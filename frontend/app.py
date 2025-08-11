@@ -29,7 +29,7 @@ HIDE_SIDEBAR = os.getenv("OFERGPT_HIDE_SIDEBAR", "0") == "1"
 BASE_DIR = os.path.dirname(__file__)
 
 _icon_candidates = [
-    os.path.join(BASE_DIR, "assets", "noicon.png")
+    os.path.join(BASE_DIR, "assets", "icon.png")
 ]
 _page_icon = next((p for p in _icon_candidates if os.path.exists(p)), "🦌")
 st.set_page_config(
