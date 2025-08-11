@@ -41,7 +41,7 @@ st.set_page_config(
 
 @st.cache_resource
 def run_s3_sync_once() -> bool:
-    """Run S3 pull/ingest/push once per server process. Returns True if executed."""
+    """Run S3 pull"""
     try:
         S3_BUCKET = os.getenv("S3_BUCKET")
         if not S3_BUCKET:
@@ -75,169 +75,10 @@ def run_s3_sync_once() -> bool:
             endpoint_url=S3_ENDPOINT,
             overwrite=False,
         )
-        # Full uploads sync + ingest + push (always, when invoked)
-        uploads_dir = "./data/uploads"
-        os.makedirs(uploads_dir, exist_ok=True)
-        uploads_prefix = f"{base_prefix}/uploads" if base_prefix else "uploads"
-        print(f"[S3] Pulling uploads: s3://{S3_BUCKET}/{uploads_prefix} -> {uploads_dir}", flush=True)
-        sync_s3_prefix_to_dir(
-            bucket=S3_BUCKET,
-            prefix=uploads_prefix,
-            local_dir=uploads_dir,
-            region=S3_REGION,
-            access_key=AWS_ACCESS_KEY_ID,
-            secret_key=AWS_SECRET_ACCESS_KEY,
-            session_token=AWS_SESSION_TOKEN,
-            endpoint_url=S3_ENDPOINT,
-            overwrite=False,
-        )
-
-        # Ingest all types (idempotent) then push embeddings back
-        rag = RAGSystem()
-        total_json = 0
-        total_pdfs = 0
-        total_csvs = 0
-        total_photos = 0
-        try:
-            j2, p2, c2 = ingest_scan_uploads(rag)
-            total_json += j2; total_pdfs += p2; total_csvs += c2
-            print(f"[INGEST][S3] scan uploads: json={j2} pdfs={p2} csvs={c2}", flush=True)
-        except Exception as e:
-            print(f"[INGEST][S3] scan uploads failed: {e}", flush=True)
-
-        try:
-            j3 = ingest_instagram_jsons_in_uploads(rag); total_json += (j3 or 0)
-            print(f"[INGEST][S3] instagram json embedded: {j3}", flush=True)
-        except Exception as e:
-            print(f"[INGEST][S3] instagram json failed: {e}", flush=True)
-
-        try:
-            p3 = ingest_pdfs_in_uploads(rag); total_pdfs += (p3 or 0)
-            print(f"[INGEST][S3] pdfs embedded: {p3}", flush=True)
-        except Exception as e:
-            print(f"[INGEST][S3] pdfs failed: {e}", flush=True)
-
-        try:
-            c3 = ingest_csvs_in_uploads(rag); total_csvs += (c3 or 0)
-            print(f"[INGEST][S3] csvs processed: {c3}", flush=True)
-        except Exception as e:
-            print(f"[INGEST][S3] csvs failed: {e}", flush=True)
-
-        try:
-            pcount = ingest_photos_from_photos_dir(rag, photos_dir="./data/uploads/photos"); total_photos += (pcount or 0)
-            print(f"[INGEST][S3] photos dir embedded: {pcount}", flush=True)
-        except Exception as e:
-            print(f"[INGEST][S3] photos dir failed: {e}", flush=True)
-
-        print(f"[INGEST][S3] totals -> json={total_json} pdfs={total_pdfs} csvs={total_csvs} photos={total_photos}", flush=True)
-
-        # Push back non-photo uploads to S3 (skip images), only if new/updated
-        try:
-            import hashlib
-            import boto3  # type: ignore
-            session = boto3.session.Session(
-                aws_access_key_id=AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-                aws_session_token=AWS_SESSION_TOKEN,
-                region_name=S3_REGION,
-            )
-            s3_client = session.client("s3", endpoint_url=S3_ENDPOINT)
-
-            allowed_ext = {".pdf", ".csv", ".json", ".txt", ".md"}
-            image_ext = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".heic"}
-
-            def md5sum(path: str) -> str:
-                h = hashlib.md5()
-                with open(path, "rb") as f:
-                    for chunk in iter(lambda: f.read(8192), b""):
-                        h.update(chunk)
-                return h.hexdigest()
-
-            uploaded_count = 0
-            for root, _, files in os.walk(uploads_dir):
-                # Skip photos subdir entirely
-                if os.path.normpath(root).endswith(os.path.normpath("photos")):
-                    continue
-                for fname in files:
-                    fpath = os.path.join(root, fname)
-                    ext = os.path.splitext(fname)[1].lower()
-                    if ext in image_ext:
-                        continue
-                    if allowed_ext and ext not in allowed_ext:
-                        # Ignore unknown extensions to be conservative
-                        continue
-
-                    rel = os.path.relpath(fpath, uploads_dir).replace("\\", "/")
-                    key = f"{uploads_prefix}/{rel}" if uploads_prefix else rel
-
-                    # Check if remote exists and has same ETag (md5)
-                    local_md5 = None
-                    try:
-                        head = s3_client.head_object(Bucket=S3_BUCKET, Key=key)
-                        etag = head.get("ETag", "").strip('"')
-                        # Only simple, non-multipart uploads have md5 in ETag
-                        local_md5 = md5sum(fpath)
-                        if etag == local_md5:
-                            # Unchanged
-                            continue
-                    except Exception:
-                        # Not found or cannot head; proceed to upload
-                        pass
-
-                    try:
-                        s3_client.upload_file(fpath, S3_BUCKET, key)
-                        uploaded_count += 1
-                        print(f"[S3][UPLOADS] Uploaded non-photo: {fpath} -> s3://{S3_BUCKET}/{key}", flush=True)
-                    except Exception as e:
-                        print(f"[S3][UPLOADS] Failed to upload {fpath}: {e}", flush=True)
-
-            print(f"[S3][UPLOADS] Non-photo uploads synced: {uploaded_count}", flush=True)
-        except Exception as e:
-            print(f"[S3][UPLOADS] Error during non-photo uploads sync: {e}", flush=True)
-
-        # Push updated embeddings back to S3
-        try:
-            up = sync_dir_to_s3_prefix(
-                bucket=S3_BUCKET,
-                prefix=embeddings_prefix,
-                local_dir=embeddings_dir,
-                region=S3_REGION,
-                access_key=AWS_ACCESS_KEY_ID,
-                secret_key=AWS_SECRET_ACCESS_KEY,
-                session_token=AWS_SESSION_TOKEN,
-                endpoint_url=S3_ENDPOINT,
-                overwrite=False,
-            )
-            print(f"[S3] Uploaded/updated embeddings files: {up}", flush=True)
-        except Exception as e:
-            print(f"[S3] Failed to upload embeddings: {e}", flush=True)
-
-        # Additionally upload the CSV summary if present
-        try:
-            csv_path = os.path.join("data", "embeddings_dump.csv")
-            if os.path.exists(csv_path):
-                try:
-                    import boto3  # type: ignore
-                    session = boto3.session.Session(
-                        aws_access_key_id=AWS_ACCESS_KEY_ID,
-                        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-                        aws_session_token=AWS_SESSION_TOKEN,
-                        region_name=S3_REGION,
-                    )
-                    s3 = session.client("s3", endpoint_url=S3_ENDPOINT)
-                    csv_key = f"{embeddings_prefix}/embeddings_dump.csv" if embeddings_prefix else "embeddings_dump.csv"
-                    s3.upload_file(csv_path, S3_BUCKET, csv_key)
-                    print(f"[S3] Uploaded embeddings CSV: {csv_path} -> s3://{S3_BUCKET}/{csv_key}", flush=True)
-                except Exception as e:
-                    print(f"[S3] Failed to upload embeddings CSV: {e}", flush=True)
-            else:
-                print("[S3] embeddings_dump.csv not found; skipping CSV upload", flush=True)
-        except Exception as e:
-            print(f"[S3] Error in embeddings CSV upload step: {e}", flush=True)
 
         return True
     except Exception as e:
-        print(f"[S3] Skipping S3 sync due to error: {e}", flush=True)
+        print(f"[S3] Skipping S3 pull due to error: {e}", flush=True)
         return False
 
 # Optional one-time full sync on server start (controlled by a single flag)
