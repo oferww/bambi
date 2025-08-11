@@ -17,7 +17,7 @@ from backend.ingestion import (
     ingest_instagram_jsons_in_uploads,
     ingest_photos_from_photos_dir,
 )
-
+import random
 # Load environment variables
 load_dotenv()
 
@@ -38,6 +38,49 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state=("collapsed" if HIDE_SIDEBAR else "expanded"),
 )
+
+# Rotating chat input placeholders
+PLACEHOLDERS = [
+    "Ask me about Ofer's life... 🦌",
+    "Ask me about Ofer's education... 📚",
+    "Ask me about Ofer's career... 🏆",
+    "Ask me about Ofer's travels... 🌍",
+    "Ask me about Ofer's cinema taste... 🎬",
+    "Spill the Ofer tea… ☕",
+    "What’s the latest on Planet Ofer? 🪐",
+    "Ask me something Ofer-the-top 😏",
+    "Career gossip about Ofer? 🧑‍💼",
+    "Got Ofer lore to unlock? 📖",
+    "Where in the world is Ofer now? 🌍",
+    "Tell me your Ofer thoughts, I’ll rank them. 🏆",
+    "Ofer’s origin story, act 1? 🎬",
+    "What did Ofer learn this time? 🎓",
+    "Plot twist in Ofer’s saga? 🔀",
+    "Which Ofer timeline are we in? ⏳",
+    "Travel tales: Ofer edition ✈️",
+    "Hot takes on Ofer’s movies? 🍿",
+    "If Ofer were a meme…? 😂",
+    "Two truths and a lie about Ofer 🤫",
+    "What’s Ofer cooking today? 🍳",
+    "Ask me like I’m Ofer’s diary 📓",
+    "Break the Ofer-ice 🧊",
+    "Pitch Ofer’s biopic title 🎥",
+    "One Ofer fact to rule them all 💍",
+    "Plot Ofer on a map 🗺️",
+    "Ofer’s playlist vibes? 🎧",
+    "Give me an Ofer riddle 🧩",
+    "What would Ofer do? (WWOD) 🧠",
+]
+
+if "current_placeholder" not in st.session_state:
+    st.session_state.current_placeholder = random.choice(PLACEHOLDERS)
+
+def _next_placeholder():
+    """Pick a different placeholder for the next prompt."""
+    options = [p for p in PLACEHOLDERS if p != st.session_state.current_placeholder]
+    if options:
+        st.session_state.current_placeholder = random.choice(options)
+    # If options is empty (single item list), keep as is
 
 @st.cache_resource
 def run_s3_sync_once() -> bool:
@@ -920,7 +963,8 @@ def main():
 
     # Main chat interface
     # Chat input (fixed footer, outside columns to satisfy Streamlit constraints)
-    user_input = st.chat_input(placeholder="Ask me anything about Ofer...")
+    user_input = st.chat_input(placeholder=st.session_state.get("current_placeholder", "Ask me about Ofer's life..."))
+
     if user_input and user_input.strip():
         if not st.session_state.chatbot:
             st.error("Please initialize the chatbot first!")
@@ -928,6 +972,11 @@ def main():
             # Add user message to history immediately; mark pending assistant reply
             st.session_state.chat_history.append({"role": "user", "content": user_input})
             st.session_state.pending_response = True
+            # Rotate placeholder for the next prompt
+            try:
+                _next_placeholder()
+            except Exception:
+                pass
             st.rerun()
     col1, col2, col3 = st.columns([0.15, 0.7, 0.15])
     
