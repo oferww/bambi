@@ -96,10 +96,13 @@ if st.sidebar.button("Sync from S3"):
         st.sidebar.success("S3 sync completed.")
     else:
         st.sidebar.warning("S3 sync skipped or failed. Check logs.")
-if os.path.exists(_png):
-    _fav_links.append("<link rel='icon' href='frontend/assets/icon.png' type='image/png'>")
-if _fav_links:
-    st.markdown("\n".join(_fav_links), unsafe_allow_html=True)
+
+st.markdown("""
+<div class="top-banner">
+  Powered by Streamlit, LangChain, Cohere, and ChromaDB. <br>
+  Source code available at <a href="https://github.com/oferww/bambi">github.com/oferww/bambi</a>
+</div>
+""", unsafe_allow_html=True)
 
 # If hiding sidebar, inject CSS to remove it from the layout entirely
 if HIDE_SIDEBAR:
@@ -151,6 +154,7 @@ st.markdown(
         backdrop-filter: none !important;
         -webkit-backdrop-filter: none !important;
         box-shadow: none !important;
+        padding-top: 6px !important; /* bring content closer to top */
       }
 
       /* Also clear common inner wrappers to avoid white strips */
@@ -174,6 +178,15 @@ st.markdown(
 
       /* Transparent header */
       [data-testid="stHeader"] { background: transparent !important; }
+
+      /* Top banner (scrolls with content, not sticky) */
+      .top-banner {
+        margin: 0;
+        padding: 4px 0;
+        text-align: center;
+        color: #666;
+        font-size: 0.9rem;
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1041,12 +1054,6 @@ def main():
         # if st.button("🗑️ Clear Chat History"):
         #     st.session_state.chat_history = []
         #     st.rerun()
-    
-    # st.markdown("""
-    # <div style="text-align: center; color: #666; font-size: 0.9rem;">
-    #              Built with ❤️ using Streamlit, LangChain, Cohere, and ChromaDB
-    # </div>
-    # """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
