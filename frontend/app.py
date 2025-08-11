@@ -112,6 +112,8 @@ if HIDE_SIDEBAR:
           [data-testid="stSidebar"] { display: none !important; }
           /* Also hide the sidebar hamburger if present */
           button[kind="header"] { display: none !important; }
+          /* Hide the collapsed sidebar arrow/control */
+          [data-testid="collapsedControl"] { display: none !important; visibility: hidden !important; }
         </style>
         """,
         unsafe_allow_html=True,
