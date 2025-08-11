@@ -1,0 +1,15 @@
+# Exclude development tools and legacy scripts from production images
+dev_tools/
+tests/
+
+# Common exclusions
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+.git/
+.gitignore
+.devcontainer/
+.vscode/
+.env

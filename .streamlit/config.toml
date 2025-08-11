@@ -1,0 +1,6 @@
+[theme]
+primaryColor = "#e8f5e9"          # match background to appear transparent
+backgroundColor = "#e8f5e9"       # light green app background
+secondaryBackgroundColor = "#ffffff"  # surfaces like inputs/cards
+textColor = "#0f2a12"             # dark greenish text
+font = "sans serif"

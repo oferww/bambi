@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  ofergpt-chatbot:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./:/app              # Bind-mount full source for live code reloads
+      - ./data:/app/data
+      - ./keys:/keys
+      - ./.env:/app/.env
+    environment:
+      - COHERE_API_KEY=${COHERE_API_KEY}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}
+      # PDF summarization performance knobs
+      - PDF_SUMMARY_MODE=summarize          # options: summarize|chat|off
+      - PDF_SUMMARY_CHUNK_SIZE=6000         # bigger chunks = fewer API calls
+      - PDF_SUMMARY_CHUNK_OVERLAP=100       # smaller overlap
+      - PDF_SUMMARY_MAX_CHARS=60000         # cap long PDFs to this many chars
+      - PDF_SUMMARY_ENABLE_REDUCE=0         # skip final reduce pass for speed
+      
+      # UI controls
+      - OFERGPT_HIDE_SIDEBAR=${OFERGPT_HIDE_SIDEBAR}
+      - OFERGPT_STARTUP_EMBED_PDFS=0
+    restart: unless-stopped
