@@ -18,6 +18,7 @@ from backend.ingestion import (
     ingest_photos_from_photos_dir,
 )
 import random
+import html as html_lib
 # Load environment variables
 load_dotenv()
 
@@ -71,6 +72,22 @@ PLACEHOLDERS = [
     "Give me an Ofer riddle 🧩",
     "What would Ofer do? (WWOD) 🧠",
 ]
+
+# Witty, on-theme dynamic thinking lines
+THINKING_PHRASES = {
+    "Running through the meadow, searching for the answer" : "🦌",
+    "Leafing through Ofer’s memories… quite literally" : "🍃",
+    "Sniffing out Ofer facts on the trail" : "🦌",
+    "Tracking footprints from Ofer’s travels" : "✈️",
+    "Browsing Ofer’s film shelf for clues" : "🎬",
+    "Studying Ofer’s syllabus like midterms" : "📚",
+    "Hiking across Ofer’s career path for hints" : "🏞️",
+    "Mapping Ofer’s story one breadcrumb at a time" : "🗺️",
+    "Tuning into Ofer’s soundtrack for signals" : "🎧",
+    "Dusting off Ofer lore in the archives" : "🗄️",
+    "Following a green trail to the truth" : "🌿",
+    "Cross-referencing Ofer’s chapters… page by page" : "📖",
+}
 
 if "current_placeholder" not in st.session_state:
     st.session_state.current_placeholder = random.choice(PLACEHOLDERS)
@@ -1051,10 +1068,59 @@ def main():
                         message_placeholder = st.empty()
                         
                         # Show loading spinner before streaming starts
-                        with message_placeholder.container():
-                            col1 = st.columns([1])[0]
-                            with col1:
-                                st.markdown("   *Running in the field searching for the answer...*")
+                        line, emoji = random.choice(list(THINKING_PHRASES.items()))
+                        _html = """
+                                <div class="bambi-thinking-wrap">
+                                  <div class="bambi-thinking">
+                                    <span class="text">{LINE}</span>
+                                    <span class="deer">{EMOJI}</span>
+                                  </div>
+                                </div>
+                                <style>
+                                  .bambi-thinking-wrap {
+                                    display: flex;
+                                    align-items: center;
+                                    justify-content: center;
+                                    width: 100%;
+                                    min-height: 56px; /* make space so vertical centering is visible */
+                                    text-align: center;
+                                  }
+                                  @keyframes bambi-gallop {
+                                    0% { transform: translateX(0) rotate(0deg); }
+                                    25% { transform: translateX(6px) rotate(2deg); }
+                                    50% { transform: translateX(12px) rotate(0deg); }
+                                    75% { transform: translateX(6px) rotate(-2deg); }
+                                    100% { transform: translateX(0) rotate(0deg); }
+                                  }
+                                  @keyframes bambi-pulse {
+                                    0% { opacity: 0.6; }
+                                    50% { opacity: 1; }
+                                    100% { opacity: 0.6; }
+                                  }
+                                  .bambi-thinking {
+                                    display: inline-flex;
+                                    align-items: center;
+                                    justify-content: center;
+                                    gap: 8px;
+                                    font-style: italic;
+                                    color: #44A644;
+                                    padding: 6px 8px;
+                                    border-radius: 8px;
+                                    background: transparent !important;
+                                    border: none !important;
+                                  }
+                                  .bambi-thinking .deer {
+                                    display: inline-block;
+                                    font-size: 1.15rem;
+                                    animation: bambi-gallop 1.2s ease-in-out infinite;
+                                    filter: saturate(1.1);
+                                  }
+                                  .bambi-thinking .text {
+                                    animation: bambi-pulse 1.6s ease-in-out infinite;
+                                  }
+                                </style>
+                        """
+                        message_placeholder.markdown(_html.replace("{LINE}", html_lib.escape(line)).replace("{EMOJI}", emoji), unsafe_allow_html=True)
                         
                         full_response = ""
                         
