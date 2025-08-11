@@ -192,6 +192,22 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Render static header logo once at top-level (outside main)
+# Ensures the logo is present immediately and not tied to first prompt re-run
+_header_logo = os.path.join(BASE_DIR, "assets", "bambi.png")
+if os.path.exists(_header_logo):
+    import base64
+    with open(_header_logo, "rb") as _f:
+        _logo_b64 = base64.b64encode(_f.read()).decode("utf-8")
+    st.markdown(
+        f'''
+        <div style="display:flex; justify-content:center; align-items:center; margin: 10px 0 6px 0;">
+            <img src="data:image/png;base64,{_logo_b64}" alt="bambi" style="width:340px; height:auto;" />
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
+
 # Custom CSS for better styling
 st.markdown("""
 <style>
@@ -440,21 +456,7 @@ def main():
     if not st.session_state.get('chatbot'):
         with st.spinner("🚀 Initializing bambi..."):
             chatbot = initialize_chatbot()
-    
-    # Static header logo (top of page, outside chat area) - always centered
-    _header_logo = os.path.join(BASE_DIR, "assets", "bambi.png")
-    if os.path.exists(_header_logo):
-        import base64
-        with open(_header_logo, "rb") as f:
-            _logo_b64 = base64.b64encode(f.read()).decode("utf-8")
-        st.markdown(
-            f'''
-            <div style="display:flex; justify-content:center; align-items:center; margin: 10px 0 6px 0;">
-                <img src="data:image/png;base64,{_logo_b64}" alt="bambi" style="width:340px; height:auto;" />
-            </div>
-            ''',
-            unsafe_allow_html=True,
-        )
+
     
     # Sidebar
     if not HIDE_SIDEBAR:
