@@ -1,6 +1,7 @@
 import os
 import cohere
 from typing import List, Dict, Any
+import concurrent.futures as cf
 from .rag_system import RAGSystem
 from langchain.memory import ConversationSummaryBufferMemory
 from langchain.schema import BaseMessage, HumanMessage, AIMessage
@@ -130,8 +131,8 @@ class OferGPT:
         keep = max(0, limit - len(suffix))
         return text[:keep] + suffix
 
-    def get_relevant_context(self, query: str) -> str:
-        """Retrieve relevant context from the knowledge base for the query."""
+    def _compute_relevant_context(self, query: str) -> str:
+        """Compute the RAG context for a query (no timeout)."""
         # Allow configuring how many documents to retrieve for RAG context
         try:
             top_k = int(os.getenv("OFERGPT_RAG_TOP_K", "20"))
@@ -211,6 +212,33 @@ class OferGPT:
         self.last_rag_context = context_str
         self.last_user_query = query
         return context_str
+
+    def get_relevant_context(self, query: str) -> str:
+        """Retrieve relevant context with a timeout; if exceeded, return empty context.
+
+        Timeout is configured by env var OFERGPT_RAG_TIMEOUT_SEC (default 20). Set to 0 to disable.
+        """
+        try:
+            timeout_s = int(os.getenv("OFERGPT_RAG_TIMEOUT_SEC", "20"))
+        except Exception:
+            timeout_s = 20
+        if timeout_s is not None and timeout_s > 0:
+            try:
+                with cf.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(self._compute_relevant_context, query)
+                    return fut.result(timeout=timeout_s)
+            except cf.TimeoutError:
+                print(f"⏳ RAG timed out after {timeout_s}s; proceeding without documents.", flush=True)
+                self.last_rag_context = ""
+                self.last_user_query = query
+                return ""
+            except Exception as e:
+                print(f"❌ RAG retrieval failed: {e}", flush=True)
+                self.last_rag_context = ""
+                self.last_user_query = query
+                return ""
+        # No timeout specified; compute directly
+        return self._compute_relevant_context(query)
 
     # Cross-source feature removed
     
