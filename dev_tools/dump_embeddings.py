@@ -62,10 +62,15 @@ def main():
     ap.add_argument("--out", type=Path, help="Write CSV to this path instead of stdout")
     args = ap.parse_args()
 
-    rows = fetch_docs(args.limit, parse_where(args.where))
+    # If a text filter is provided, fetch all rows first (limit=0), then filter, then apply limit.
+    # This avoids the previous behavior where limit was applied before filtering, potentially hiding matches.
+    prelimit = 0 if args.contains else args.limit
+    rows = fetch_docs(prelimit, parse_where(args.where))
 
     if args.contains:
         rows = [r for r in rows if args.contains.lower() in r["text"].lower()]
+        if args.limit and args.limit > 0:
+            rows = rows[:args.limit]
 
     if args.out:
         with args.out.open("w", newline="", encoding="utf-8") as f:

@@ -1,6 +1,7 @@
 import os
 import cohere
 from typing import List, Dict, Any
+import json
 import concurrent.futures as cf
 from .rag_system import RAGSystem
 from langchain.memory import ConversationSummaryBufferMemory
@@ -32,9 +33,7 @@ class OferGPT:
         )
         
         # System prompt for the chatbot (friendlier/wittier, allow safe common-sense)
-        self.system_prompt = """Your name is bambi. Your role is to be a personal AI assistant that knows about Ofer's life. you have information about his education, career, travels around the world, his cinema taste.
-        If you are not asked about Ofer, you don't have to answer about ofer, you have also information not related to Ofer, but you can use it if it helps you to answer the question. 
-\nCRITICAL: Ground your answers in the provided context. You may apply safe, widely-known common-sense inferences (e.g., mapping a city to its country), but do NOT invent new facts about Ofer that are not implied by context.
+        self.system_prompt = """Your name is bambi. Your role is to be a personal AI assistant that knows about Ofer's life. you have information about his education, career, travels around the world, his cinema taste. If you are not asked about Ofer, you don't have to answer about ofer, you have also information not related to Ofer, but you can use it if it helps you to answer the question. CRITICAL: Ground your answers in the provided context. You may apply safe, widely-known common-sense inferences e.g., mapping a city to its country, but do NOT invent new facts about Ofer that are not implied by context.
 
 \n\nYour role is to:
 \n1. Answer questions about Ofer's life and experiences based on provided context.
@@ -155,6 +154,33 @@ class OferGPT:
         retrieved = self.rag_system.search_similar(query, k=top_k)
         # Optional neural re-ranking (Cohere Rerank) to improve ordering
         retrieved = self._maybe_rerank(query, retrieved)
+        # Verbose logging of all RAG documents found (pre-cap)
+        try:
+            print(f"[RAG] Retrieved {len(retrieved)} documents:", flush=True)
+            for i, doc in enumerate(retrieved, start=1):
+                try:
+                    meta = doc.get("metadata", {}) or {}
+                    content = doc.get("content", "") or ""
+                    # Prefer cosine similarity (higher is better) with raw distance for reference
+                    cosine_sim = doc.get("cosine_similarity")
+                    distance = doc.get("distance")
+                    # Backward-compat: if only old field present, compute sim from it
+                    if cosine_sim is None and doc.get("similarity_score") is not None:
+                        try:
+                            distance = float(doc.get("similarity_score"))
+                            cosine_sim = 1.0 - distance
+                        except Exception:
+                            pass
+                    meta_json = json.dumps(meta, ensure_ascii=False)
+                    print(
+                        f"[RAG][DOC {i}] cosine_similarity={cosine_sim} distance={distance}\n"
+                        f"metadata={meta_json}\ncontent=\n{content}\n[END DOC {i}]\n",
+                        flush=True,
+                    )
+                except Exception as _e:
+                    print(f"[RAG] Failed to log doc {i}: {_e}", flush=True)
+        except Exception as _e:
+            print(f"[RAG] Verbose logging failed: {_e}", flush=True)
         # Wrap each document with clear markers and concise metadata header; apply per-doc cap
         doc_blocks = []
         for i, doc in enumerate(retrieved[:max_docs], start=1):
@@ -170,11 +196,20 @@ class OferGPT:
                 or ""
             )
             loc = meta.get("location_name") or meta.get("country") or ""
-            score = doc.get("similarity_score")
+            # Prefer cosine similarity for header
+            cosine_sim = doc.get("cosine_similarity")
+            distance = doc.get("distance")
+            # Backward-compat: derive from legacy field if needed
+            if cosine_sim is None and doc.get("similarity_score") is not None:
+                try:
+                    distance = float(doc.get("similarity_score"))
+                    cosine_sim = 1.0 - distance
+                except Exception:
+                    pass
             try:
-                score_str = f"{float(score):.3f}" if score is not None else ""
+                sim_str = f"{float(cosine_sim):.3f}" if cosine_sim is not None else ""
             except Exception:
-                score_str = str(score) if score is not None else ""
+                sim_str = str(cosine_sim) if cosine_sim is not None else ""
             header_bits = []
             if t:
                 header_bits.append(f"type={t}")
@@ -182,8 +217,8 @@ class OferGPT:
                 header_bits.append(f"date={date}")
             if loc:
                 header_bits.append(f"loc={loc}")
-            if score_str:
-                header_bits.append(f"score={score_str}")
+            if sim_str:
+                header_bits.append(f"cos_sim={sim_str}")
             header = "; ".join(header_bits)
             content = doc.get('content', '') or ''
             content = self._truncate(content, per_doc_cap)
@@ -255,6 +290,17 @@ User question: {query}
 
 Please provide a helpful response based STRICTLY on the context about Ofer:"""
         try:
+            # Log full Cohere API call parameters
+            params = {
+                "endpoint": "generate",
+                "model": os.getenv("COHERE_CHAT_MODEL"),  # may be None for generate()
+                "temperature": 0.35,
+                "max_tokens": 300,
+                "p": 0.9,
+                "stop_sequences": ["\n\nUser:", "\n\nQ:", "User question:", "Context about"],
+                "prompt_preview": prompt[:500]
+            }
+            print(f"[COHERE][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
             response = self.cohere_client.generate(
                 prompt=prompt,
                 temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
@@ -262,6 +308,14 @@ Please provide a helpful response based STRICTLY on the context about Ofer:"""
                 p=0.9,
                 stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
             )
+            # Log full response object (best-effort)
+            try:
+                print(f"[COHERE][RESPONSE] {response}", flush=True)
+            except Exception:
+                try:
+                    print(f"[COHERE][RESPONSE_DICT] {getattr(response, '__dict__', {})}", flush=True)
+                except Exception:
+                    pass
             answer = response.generations[0].text.strip()
             return answer
         except Exception as e:
@@ -289,6 +343,17 @@ Current context about Ofer:
 User question: {query}
 
 Please provide a helpful response based STRICTLY on the context about Ofer and our previous conversation. DO NOT invent, assume, or make up any details not explicitly mentioned in the context above:"""
+            # Log full Cohere API call parameters
+            params = {
+                "endpoint": "generate",
+                "model": os.getenv("COHERE_CHAT_MODEL"),  # may be None for generate()
+                "temperature": 0.35,
+                "max_tokens": 300,
+                "p": 0.9,
+                "stop_sequences": ["\n\nUser:", "\n\nQ:", "User question:", "Context about"],
+                "prompt_preview": prompt[:500]
+            }
+            print(f"[COHERE][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
             response = self.cohere_client.generate(
                 prompt=prompt,
                 temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
@@ -296,6 +361,14 @@ Please provide a helpful response based STRICTLY on the context about Ofer and o
                 p=0.9,
                 stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
             )
+            # Log full response object (best-effort)
+            try:
+                print(f"[COHERE][RESPONSE] {response}", flush=True)
+            except Exception:
+                try:
+                    print(f"[COHERE][RESPONSE_DICT] {getattr(response, '__dict__', {})}", flush=True)
+                except Exception:
+                    pass
             answer = response.generations[0].text.strip()
             return answer
         except Exception as e:
@@ -329,6 +402,18 @@ User question: {query}
 Please provide a helpful response based STRICTLY on the context about Ofer and our previous conversation. DO NOT invent, assume, or make up any details not explicitly mentioned in the context above:"""
             try:
                 print("🚀 Attempting real Cohere streaming...", flush=True)
+                # Log full Cohere API call parameters for streaming
+                params = {
+                    "endpoint": "generate",
+                    "model": os.getenv("COHERE_CHAT_MODEL"),  # may be None for generate()
+                    "temperature": 0.35,
+                    "max_tokens": 300,
+                    "p": 0.9,
+                    "stop_sequences": ["\n\nUser:", "\n\nQ:", "User question:", "Context about"],
+                    "stream": True,
+                    "prompt_preview": prompt[:500]
+                }
+                print(f"[COHERE][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
                 response = self.cohere_client.generate(
                     prompt=prompt,
                     temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks

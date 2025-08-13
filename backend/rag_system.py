@@ -485,14 +485,14 @@ class RAGSystem:
                                 lines = [ln.strip().strip("-• ").strip("'\"") for ln in t.splitlines() if ln.strip()]
                                 candidates = lines if len(lines) > 1 else [t]
 
-                            # Choose candidate with highest token overlap to original; tie-break: shorter text
+                            # Choose candidate with highest token overlap to original
                             orig_tokens = set(original.lower().split())
                             best = None
                             best_score = -1
                             for cand in candidates:
                                 tokens = set(cand.lower().split())
                                 score = len(tokens & orig_tokens)
-                                if best is None or score > best_score or (score == best_score and len(cand) < len(best)):
+                                if best is None or score > best_score:
                                     best = cand
                                     best_score = score
                             return (best or original).strip("'\"")
@@ -533,6 +533,16 @@ class RAGSystem:
             # 2) Build query list: corrected first (preferred), then original if different
             queries = [corrected] if corrected == original else [corrected, original]
             print(f"[RAG] Using queries: {queries}")
+            # Determine overfetch amount: fetch more than requested k, then trim later
+            try:
+                fetch_k = int(os.getenv("OFERGPT_RAG_FETCH_K", "500"))
+            except Exception:
+                fetch_k = 500
+            # Ensure we fetch at least k items
+            try:
+                fetch_k = max(fetch_k, int(k))
+            except Exception:
+                pass
             # 3) Perform searches and merge results with preference for corrected pass
             merged: Dict[str, Dict[str, Any]] = {}
 
@@ -546,37 +556,50 @@ class RAGSystem:
                     ).hexdigest()
                 )
                 return key
-
+            
             for idx, q in enumerate(queries):
                 try:
-                    results = self.vectorstore.similarity_search_with_score(q, k=k)
+                    results = self.vectorstore.similarity_search_with_score(q, k=fetch_k)
                 except Exception as inner_e:
                     print(f"[RAG] Search failed for query variant {idx}: {inner_e}")
                     continue
 
                 for doc, score in results:
                     key = _doc_key(doc)
+                    # Chroma returns a distance. Convert to cosine similarity where higher is better.
+                    try:
+                        distance = float(score)
+                    except Exception:
+                        distance = None
+                    cosine_sim = (1.0 - distance) if distance is not None else None
                     entry = {
                         "content": doc.page_content,
                         "metadata": doc.metadata,
-                        "similarity_score": float(score),
-                        "_preferred": (idx == 0),  # corrected pass first
+                        "distance": distance,                 # raw distance from Chroma
+                        "cosine_similarity": cosine_sim,      # derived similarity (higher is better)
+                        "_preferred": (idx == 0),             # corrected pass first
                     }
                     if key in merged:
-                        # Keep the better score (lower is better for distances) and keep preferred if any
+                        # Keep the better item by cosine similarity; mark preferred if applicable
                         existing = merged[key]
-                        if entry["similarity_score"] < existing["similarity_score"]:
+                        existing_sim = existing.get("cosine_similarity", float("-inf"))
+                        new_sim = entry.get("cosine_similarity", float("-inf"))
+                        if new_sim > existing_sim:
                             existing.update(entry)
                         else:
-                            # If scores are equal or worse, but current is preferred and existing isn't, mark preferred
                             if entry["_preferred"] and not existing.get("_preferred"):
                                 existing["_preferred"] = True
                     else:
                         merged[key] = entry
 
-            # 4) Sort: prefer corrected-pass results, then by ascending distance/score
+            # 4) Sort: prefer corrected-pass results, then by DESC cosine similarity
             merged_list = list(merged.values())
-            merged_list.sort(key=lambda x: (not x.get("_preferred", False), x.get("similarity_score", 1e9)))
+            merged_list.sort(
+                key=lambda x: (
+                    not x.get("_preferred", False),
+                    -(x.get("cosine_similarity", float("-inf")) if x.get("cosine_similarity") is not None else float("-inf"))
+                )
+            )
 
             # 5) Trim to top-k and drop helper field
             final = []
