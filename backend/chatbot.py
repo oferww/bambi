@@ -285,13 +285,30 @@ Please provide a helpful response based STRICTLY on the context about Ofer:"""
                 "prompt_preview": prompt[:500]
             }
             print(f"[COHERE][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
-            response = self.cohere_client.generate(
-                prompt=prompt,
-                temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
-                max_tokens=300,
-                p=0.9,
-                stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
-            )
+            # Simple timeout around Cohere call
+            try:
+                timeout_s = int(os.getenv("OFERGPT_COHERE_TIMEOUT_SEC", "25"))
+            except Exception:
+                timeout_s = 20
+            if timeout_s and timeout_s > 0:
+                with cf.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(
+                        self.cohere_client.generate,
+                        prompt=prompt,
+                        temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
+                        max_tokens=300,
+                        p=0.9,
+                        stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
+                    )
+                    response = fut.result(timeout=timeout_s)
+            else:
+                response = self.cohere_client.generate(
+                    prompt=prompt,
+                    temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
+                    max_tokens=300,
+                    p=0.9,
+                    stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
+                )
             # Log full response object (best-effort)
             try:
                 print(f"[COHERE][RESPONSE] {response}", flush=True)
@@ -302,6 +319,9 @@ Please provide a helpful response based STRICTLY on the context about Ofer:"""
                     pass
             answer = response.generations[0].text.strip()
             return answer
+        except cf.TimeoutError:
+            print("⏳ Cohere generate() timed out; returning fallback message.", flush=True)
+            return "I'm sorry, the request took too long. Please try again."
         except Exception as e:
             print(f"Error generating response: {e}")
             return "I'm sorry, I'm having trouble generating a response right now. Please try again."
@@ -338,13 +358,30 @@ Please provide a helpful response based STRICTLY on the context about Ofer and o
                 "prompt_preview": prompt[:500]
             }
             print(f"[COHERE][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
-            response = self.cohere_client.generate(
-                prompt=prompt,
-                temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
-                max_tokens=300,
-                p=0.9,
-                stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
-            )
+            # Simple timeout around Cohere call
+            try:
+                timeout_s = int(os.getenv("OFERGPT_COHERE_TIMEOUT_SEC", "25"))
+            except Exception:
+                timeout_s = 20
+            if timeout_s and timeout_s > 0:
+                with cf.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(
+                        self.cohere_client.generate,
+                        prompt=prompt,
+                        temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
+                        max_tokens=300,
+                        p=0.9,
+                        stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
+                    )
+                    response = fut.result(timeout=timeout_s)
+            else:
+                response = self.cohere_client.generate(
+                    prompt=prompt,
+                    temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
+                    max_tokens=300,
+                    p=0.9,
+                    stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
+                )
             # Log full response object (best-effort)
             try:
                 print(f"[COHERE][RESPONSE] {response}", flush=True)
@@ -355,6 +392,9 @@ Please provide a helpful response based STRICTLY on the context about Ofer and o
                     pass
             answer = response.generations[0].text.strip()
             return answer
+        except cf.TimeoutError:
+            print("⏳ Cohere generate() timed out; returning fallback message.", flush=True)
+            return "I'm sorry, the request took too long. Please try again."
         except Exception as e:
             print(f"Error generating response with memory: {e}")
             return "I'm sorry, I'm having trouble generating a response right now. Please try again."

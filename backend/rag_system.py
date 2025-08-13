@@ -14,6 +14,7 @@ import csv
 import cohere
 import re
 import difflib
+import concurrent.futures as cf
  
  
 
@@ -461,7 +462,26 @@ class RAGSystem:
                     )
 
                     model_name = os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025")
-                    resp = c.chat(model=model_name, message=f"{system_instr}\n\nQuery: {original}", temperature=0)
+                    # Simple timeout around Cohere chat call for spell-correction
+                    try:
+                        timeout_s = int(os.getenv("OFERGPT_COHERE_TIMEOUT_SEC", "20"))
+                    except Exception:
+                        timeout_s = 20
+                    if timeout_s and timeout_s > 0:
+                        try:
+                            with cf.ThreadPoolExecutor(max_workers=1) as ex:
+                                fut = ex.submit(
+                                    c.chat,
+                                    model=model_name,
+                                    message=f"{system_instr}\n\nQuery: {original}",
+                                    temperature=0,
+                                )
+                                resp = fut.result(timeout=timeout_s)
+                        except cf.TimeoutError:
+                            print(f"[RAG] Spell-correction timed out after {timeout_s}s; using original query", flush=True)
+                            resp = None
+                    else:
+                        resp = c.chat(model=model_name, message=f"{system_instr}\n\nQuery: {original}", temperature=0)
                     if hasattr(resp, "text") and isinstance(resp.text, str) and resp.text.strip():
                         raw = resp.text.strip()
                         # Helper to sanitize and extract a single corrected query
