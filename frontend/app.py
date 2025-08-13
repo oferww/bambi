@@ -465,9 +465,9 @@ if 'pending_response' not in st.session_state:
 
 def initialize_chatbot():
     """Initialize the chatbot with Cohere API key."""
-    api_key = os.getenv("COHERE_API_KEY")
+    api_key = os.getenv("COHERE_API_KEY_CHAT")
     if not api_key:
-        st.error("❌ COHERE_API_KEY not found in environment variables!")
+        st.error("❌ COHERE_API_KEY_CHAT not found in environment variables!")
         st.info("Please set your Cohere API key in the .env file")
         return None
     

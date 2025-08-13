@@ -13,8 +13,14 @@ import hashlib
 import csv
 import cohere
 import re
- 
- 
+
+# Load local .env if available for CLI/dev usage
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    # Safe to ignore if python-dotenv isn't installed
+    pass
 
 # Comprehensive ChromaDB telemetry disabling
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
@@ -73,7 +79,7 @@ class RAGSystem:
         # Initialize Cohere embeddings
         self.embeddings = CohereEmbeddings(
             model="embed-english-v3.0",
-            cohere_api_key=os.getenv("COHERE_API_KEY")
+            cohere_api_key=os.getenv("COHERE_API_KEY_EMBED")
         )
         
         # Initialize ChromaDB
@@ -439,7 +445,7 @@ class RAGSystem:
             # 1) Spell-correct query via Cohere (best-effort)
             corrected = query
             try:
-                api_key = os.getenv("COHERE_API_KEY")
+                api_key = os.getenv("COHERE_API_KEY_CHAT")
                 if api_key:
                     c = cohere.Client(api_key=api_key)
                     system_instr = (

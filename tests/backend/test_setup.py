@@ -15,13 +15,13 @@ def test_environment():
     load_dotenv()
 
     # Check Cohere API key
-    api_key = os.getenv("COHERE_API_KEY")
+    api_key = os.getenv("COHERE_API_KEY_CHAT")
     if not api_key:
-        print("❌ COHERE_API_KEY not found in environment variables")
+        print("❌ COHERE_API_KEY_CHAT not found in environment variables")
         print("   Please set it in your .env file")
         return False
     else:
-        print("✅ COHERE_API_KEY found")
+        print("✅ COHERE_API_KEY_CHAT found")
         return True
 
 
@@ -133,7 +133,7 @@ def test_cohere_api():
 
     try:
         import cohere
-        client = cohere.Client(os.getenv("COHERE_API_KEY"))
+        client = cohere.Client(os.getenv("COHERE_API_KEY_CHAT"))
 
         # Test with a simple request
         response = client.generate(

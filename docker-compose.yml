@@ -11,7 +11,8 @@ services:
       - ./keys:/keys
       - ./.env:/app/.env
     environment:
-      - COHERE_API_KEY=${COHERE_API_KEY}
+      - COHERE_API_KEY_EMBED=${COHERE_API_KEY_EMBED}
+      - COHERE_API_KEY_CHAT=${COHERE_API_KEY_CHAT}
       - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}
       # PDF summarization performance knobs
       - PDF_SUMMARY_MODE=summarize          # options: summarize|chat|off

@@ -32,7 +32,8 @@ A personalized chatbot that knows about you through RAG (Retrieval-Augmented Gen
    ```
    Edit `.env` and add your Cohere API key:
    ```
-   COHERE_API_KEY=your_cohere_api_key_here
+   COHERE_API_KEY_EMBED=your_cohere_api_key_here
+   COHERE_API_KEY_CHAT=your_cohere_api_key_here
    ```
 
 3. **Add your data**
@@ -92,7 +93,8 @@ Create a `.env` file with:
 
 ```env
 # Required
-COHERE_API_KEY=your_cohere_api_key_here
+COHERE_API_KEY_EMBED=your_cohere_api_key_here
+COHERE_API_KEY_CHAT=your_cohere_api_key_here
 
 # Optional UI/RAG settings
 OFERGPT_HIDE_SIDEBAR=0
@@ -190,7 +192,8 @@ Advanced users can import `RAGSystem` to add text memories or perform collection
 
 2. **Set environment variables**
    ```bash
-   export COHERE_API_KEY=your_key
+   export COHERE_API_KEY_EMBED=your_key
+   export COHERE_API_KEY_CHAT=your_key
    ```
 
 3. **Run locally**

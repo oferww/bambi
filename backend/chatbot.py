@@ -11,13 +11,13 @@ class OferGPT:
     """Personal chatbot about Ofer using RAG with photos and memories."""
     
     def __init__(self):
-        self.cohere_client = cohere.Client(os.getenv("COHERE_API_KEY"))
+        self.cohere_client = cohere.Client(os.getenv("COHERE_API_KEY_CHAT"))
         self.rag_system = RAGSystem()
         self.conversation_history = []  # Keep for backward compatibility
         
         # Initialize LangChain Cohere LLM for memory summarization
         self.langchain_llm = Cohere(
-            cohere_api_key=os.getenv("COHERE_API_KEY"),
+            cohere_api_key=os.getenv("COHERE_API_KEY_CHAT"),
             model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
             temperature=0.35,  # Lower temperature for summarization
             max_tokens=200

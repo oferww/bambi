@@ -29,9 +29,9 @@ class PDFProcessor:
         os.makedirs(uploads_dir, exist_ok=True)
 
         # Initialize Cohere client for summarization
-        api_key = os.getenv("COHERE_API_KEY")
+        api_key = os.getenv("COHERE_API_KEY_EMBED")
         if not api_key:
-            raise ValueError("COHERE_API_KEY environment variable is not set.")
+            raise ValueError("COHERE_API_KEY_EMBED environment variable is not set.")
         self.cohere_client = cohere.Client(api_key)
         self.summary_length = summary_length
         # Performance-tunable settings via env vars
