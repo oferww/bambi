@@ -33,7 +33,7 @@ class OferGPT:
         )
         
         # System prompt for the chatbot (friendlier/wittier, allow safe common-sense)
-        self.system_prompt = """Your name is bambi. Your role is to be a personal AI assistant that knows about Ofer's life. you have information about his education, career, travels around the world, his cinema taste. If you are not asked about Ofer, you don't have to answer about ofer, you have also information not related to Ofer, but you can use it if it helps you to answer the question. CRITICAL: Ground your answers in the provided context. You may apply safe, widely-known common-sense inferences e.g., mapping a city to its country, but do NOT invent new facts about Ofer that are not implied by context.
+        self.system_prompt = """Your name is bambi. Your role is to be a personal AI assistant that knows about Ofer's life. you have information about his education, career, travels around the world, his cinema taste. If you are not asked about Ofer, you don't have to answer about ofer, you have also information not related to Ofer, but you can use it if it helps you to answer the question. CRITICAL: Ofer and Ofek are not the same person. Ground your answers in the provided context. You may apply safe, widely-known common-sense inferences e.g., mapping a city to its country, but do NOT invent new facts about Ofer that are not implied by context.
 
 \n\nYour role is to:
 \n1. Answer questions about Ofer's life and experiences based on provided context.
@@ -135,14 +135,14 @@ class OferGPT:
         """Compute the RAG context for a query (no timeout)."""
         # Allow configuring how many documents to retrieve for RAG context
         try:
-            top_k = int(os.getenv("OFERGPT_RAG_TOP_K", "20"))
+            top_k = int(os.getenv("OFERGPT_RAG_TOP_K", "5"))
         except Exception:
-            top_k = 20
+            top_k = 5
         # Budgets to avoid prompt overflow
         try:
-            max_docs = int(os.getenv("OFERGPT_RAG_MAX_DOCS", "10"))
+            max_docs = int(os.getenv("OFERGPT_RAG_MAX_DOCS", "5"))
         except Exception:
-            max_docs = 10
+            max_docs = 5
         try:
             ctx_budget = int(os.getenv("OFERGPT_RAG_CONTEXT_CHAR_BUDGET", "3500"))
         except Exception:

@@ -533,11 +533,16 @@ class RAGSystem:
             # 2) Build query list: corrected first (preferred), then original if different
             queries = [corrected] if corrected == original else [corrected, original]
             print(f"[RAG] Using queries: {queries}")
-            # Determine overfetch amount: fetch more than requested k, then trim later
+            # Determine overfetch amount based on collection size: fetch all, then trim later
             try:
-                fetch_k = int(os.getenv("OFERGPT_RAG_FETCH_K", "500"))
+                collection = self.chroma_client.get_or_create_collection("ofergpt_memories")
+                fetch_k = int(collection.count())
             except Exception:
-                fetch_k = 500
+                # Fallback to env/default if collection lookup fails
+                try:
+                    fetch_k = int(os.getenv("OFERGPT_RAG_FETCH_K", "500"))
+                except Exception:
+                    fetch_k = 500
             # Ensure we fetch at least k items
             try:
                 fetch_k = max(fetch_k, int(k))
@@ -577,34 +582,28 @@ class RAGSystem:
                         "metadata": doc.metadata,
                         "distance": distance,                 # raw distance from Chroma
                         "cosine_similarity": cosine_sim,      # derived similarity (higher is better)
-                        "_preferred": (idx == 0),             # corrected pass first
                     }
                     if key in merged:
-                        # Keep the better item by cosine similarity; mark preferred if applicable
+                        # Keep the better item by cosine similarity
                         existing = merged[key]
                         existing_sim = existing.get("cosine_similarity", float("-inf"))
                         new_sim = entry.get("cosine_similarity", float("-inf"))
                         if new_sim > existing_sim:
                             existing.update(entry)
-                        else:
-                            if entry["_preferred"] and not existing.get("_preferred"):
-                                existing["_preferred"] = True
                     else:
                         merged[key] = entry
 
-            # 4) Sort: prefer corrected-pass results, then by DESC cosine similarity
+            # 4) Sort by DESC cosine similarity only (no preference for corrected query)
             merged_list = list(merged.values())
             merged_list.sort(
                 key=lambda x: (
-                    not x.get("_preferred", False),
                     -(x.get("cosine_similarity", float("-inf")) if x.get("cosine_similarity") is not None else float("-inf"))
                 )
             )
 
-            # 5) Trim to top-k and drop helper field
+            # 5) Trim to top-k
             final = []
             for item in merged_list[:k]:
-                item.pop("_preferred", None)
                 final.append(item)
 
             return final
