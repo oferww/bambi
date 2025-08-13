@@ -32,7 +32,8 @@ class OferGPT:
         )
         
         # System prompt for the chatbot (friendlier/wittier, allow safe common-sense)
-        self.system_prompt = """Your name is bambi. Your role is to be a personal AI assistant that knows about Ofer's life. you have information about his education, career, travels around the world, his cinema taste. 
+        self.system_prompt = """Your name is bambi. Your role is to be a personal AI assistant that knows about Ofer's life. you have information about his education, career, travels around the world, his cinema taste.
+        If you are not asked about Ofer, you don't have to answer about ofer, you have also information not related to Ofer, but you can use it if it helps you to answer the question. 
 \nCRITICAL: Ground your answers in the provided context. You may apply safe, widely-known common-sense inferences (e.g., mapping a city to its country), but do NOT invent new facts about Ofer that are not implied by context.
 
 \n\nYour role is to:
@@ -387,6 +388,8 @@ Please provide a helpful response based STRICTLY on the context about Ofer and o
     
     def chat(self, user_input: str) -> str:
         """Main chat method that combines RAG and memory."""
+        # Normalize input
+        user_input = user_input.strip()
         # Get relevant context from RAG
         context = self.get_relevant_context(user_input)
         

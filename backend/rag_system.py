@@ -13,14 +13,9 @@ import hashlib
 import csv
 import cohere
 import re
-
-# Load local .env if available for CLI/dev usage
-try:
-    from dotenv import load_dotenv  # type: ignore
-    load_dotenv()
-except Exception:
-    # Safe to ignore if python-dotenv isn't installed
-    pass
+import difflib
+ 
+ 
 
 # Comprehensive ChromaDB telemetry disabling
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
@@ -442,19 +437,23 @@ class RAGSystem:
         and de-duplicates results, preferring corrected-query hits. No reranking.
         """
         try:
+            # Normalize original query
+            original = (query or "").strip()
             # 1) Spell-correct query via Cohere (best-effort)
-            corrected = query
+            corrected = original
             try:
                 api_key = os.getenv("COHERE_API_KEY_CHAT")
                 if api_key:
                     c = cohere.Client(api_key=api_key)
                     system_instr = (
-                        "Correct spelling and typos in the user query for information retrieval. "
-                        "Return only the corrected query as plain text with no quotes or extra words."
-                        "Do not correct the word 'Ofer' or anything similar, it is the name of the person"
+                        "Correct minor spelling and typos in the user query for information retrieval. "
+                        "Return only the corrected query as plain text with no quotes or extra words. "
+                        "Do not introduce new named entities (people, places, orgs) that are not in the original. "
+                        "Preserve names as typed unless the correction is clearly the same name with minor typos."
                     )
+
                     model_name = os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025")
-                    resp = c.chat(model=model_name, message=f"{system_instr}\n\nQuery: {query}", temperature=0)
+                    resp = c.chat(model=model_name, message=f"{system_instr}\n\nQuery: {original}", temperature=0)
                     if hasattr(resp, "text") and isinstance(resp.text, str) and resp.text.strip():
                         raw = resp.text.strip()
                         # Helper to sanitize and extract a single corrected query
@@ -490,19 +489,41 @@ class RAGSystem:
                                     best_score = score
                             return (best or original).strip("'\"")
 
-                        corrected = _extract_single_query(raw, query)
+                        corrected = _extract_single_query(raw, original)
             except Exception as ce:
                 print(f"[RAG] Spell-correction skipped due to error: {ce}")
 
-            # Normalize protected tokens: ensure 'Ofer' is preserved exactly
+            # Safety guard: only accept corrected if it's close to the original
             try:
-                if corrected:
-                    corrected = re.sub(r"\bofer\b", "Ofer", corrected, flags=re.IGNORECASE)
+                corr_norm = (corrected or "").strip()
+                # Guard against introducing new proper-name tokens not present in original
+                def _is_proper_like(tok: str) -> bool:
+                    if not tok or not any(c.isalpha() for c in tok):
+                        return False
+                    # Titlecase (John), ALLCAPS (IBM), or Mixed with leading capital
+                    return tok[:1].isupper() or (tok.isupper() and len(tok) > 1)
+
+                orig_tokens_raw = original.split()
+                corr_tokens_raw = corr_norm.split()
+                orig_lc = {t.lower().strip("'\".,!?():;[]{}") for t in orig_tokens_raw}
+                corr_lc = [(t, t.lower().strip("'\".,!?():;[]{}")) for t in corr_tokens_raw]
+                introduced_proper = any(_is_proper_like(t) and lc not in orig_lc for t, lc in corr_lc)
+                if introduced_proper:
+                    corr_norm = original
+                # Similarity metrics
+                ratio = difflib.SequenceMatcher(None, original.lower(), corr_norm.lower()).ratio() if original and corr_norm else 0.0
+                orig_tokens = set(original.lower().split())
+                corr_tokens = set(corr_norm.lower().split())
+                jaccard = (len(orig_tokens & corr_tokens) / max(1, len(orig_tokens | corr_tokens))) if orig_tokens or corr_tokens else 1.0
+                # Thresholds: conservative
+                if ratio < 0.70 and jaccard < 0.50:
+                    corr_norm = original
+                corrected = corr_norm
             except Exception:
-                pass
+                corrected = original
 
             # 2) Build query list: corrected first (preferred), then original if different
-            queries = [corrected] if corrected == query else [corrected, query]
+            queries = [corrected] if corrected == original else [corrected, original]
             print(f"[RAG] Using queries: {queries}")
             # 3) Perform searches and merge results with preference for corrected pass
             merged: Dict[str, Dict[str, Any]] = {}
