@@ -71,10 +71,18 @@ class RAGSystem:
         self.embeddings_dir = embeddings_dir
         os.makedirs(embeddings_dir, exist_ok=True)
         
-        # Initialize Cohere embeddings
+        # Initialize Cohere embeddings (use only EMBED or CHAT keys, no generic COHERE_API_KEY)
+        api_key_embed = os.getenv("COHERE_API_KEY_EMBED")
+        api_key_chat = os.getenv("COHERE_API_KEY_CHAT")
+        self.cohere_key_embed = api_key_embed 
+        self.cohere_key_chat = api_key_chat
+        if not self.cohere_key_embed or not self.cohere_key_chat:
+            raise ValueError(
+                "Missing Cohere API key. Set COHERE_API_KEY_EMBED or COHERE_API_KEY_CHAT."
+            )
         self.embeddings = CohereEmbeddings(
             model="embed-english-v3.0",
-            cohere_api_key=os.getenv("COHERE_API_KEY_EMBED")
+            cohere_api_key=self.cohere_key_embed
         )
         
         # Initialize ChromaDB
@@ -442,7 +450,7 @@ class RAGSystem:
             # 1) Spell-correct query via Cohere (best-effort)
             corrected = original
             try:
-                api_key = os.getenv("COHERE_API_KEY_CHAT")
+                api_key = self.cohere_key_chat
                 if api_key:
                     c = cohere.Client(api_key=api_key)
                     system_instr = (
