@@ -2,8 +2,9 @@
   <img src="frontend/assets/bambi.png" alt="bambi logo" width="340" />
 </p>
 
-A personal AI assistant that knows about Ofer’s life. It uses RAG (Retrieval Augmented Generation) over photos, PDFs, Instagram/CSV data, and text memories to answer questions, with a Streamlit frontend and a Cohere-powered backend.
-
+<p align="center">
+  A personal AI assistant that knows about Ofer’s life. It uses RAG (Retrieval Augmented Generation) over photos, PDFs, Instagram/CSV data, and text memories to answer questions, with a Streamlit frontend and a Cohere-powered backend.
+</p>
 
 ## Features
 - __RAG over personal data__: Vector search via ChromaDB with Cohere embeddings.
