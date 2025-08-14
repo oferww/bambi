@@ -282,6 +282,16 @@ if os.path.exists(_header_logo):
         ''',
         unsafe_allow_html=True,
     )
+    # Introductory message under the logo
+    st.markdown(
+        """
+        <div style="text-align:center; margin: 4px 0 18px 0; color:#2e7d32; font-size: 1.05rem;">
+            <strong>Welcome to bambi</strong> — your friendly AI companion for exploring Ofer’s world.<br>
+            Ask anything about life, career, travels, movies, and more. 🌿
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # Custom CSS for better styling
 st.markdown("""

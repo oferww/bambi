@@ -39,6 +39,9 @@ class OferGPT:
         self.last_rag_context = None
         self.last_user_query = None
 
+        # Intent categories the LLM may return when classifying user input
+        self._intent_labels = {"greeting", "chitchat", "nonsense", "question", "ofer_question"}
+
     def _maybe_rerank(self, query: str, retrieved: list[dict]) -> list[dict]:
         """Optionally re-rank retrieved docs using Cohere Rerank.
 
@@ -259,72 +262,6 @@ class OferGPT:
                 return ""
         # No timeout specified; compute directly
         return self._compute_relevant_context(query)
-
-    # Cross-source feature removed
-    
-    # Location context removed
-    
-    def generate_response(self, query: str, context: str) -> str:
-        prompt = f"""{self.system_prompt}
-
-Context about Ofer:
-{context}
-
-User question: {query}
-
-Please provide a helpful response based STRICTLY on the context about Ofer:"""
-        try:
-            # Log full Cohere API call parameters
-            params = {
-                "endpoint": "generate",
-                "model": os.getenv("COHERE_CHAT_MODEL"),  # may be None for generate()
-                "temperature": 0.35,
-                "max_tokens": 300,
-                "p": 0.9,
-                "stop_sequences": ["\n\nUser:", "\n\nQ:", "User question:", "Context about"],
-                "prompt_preview": prompt[:500]
-            }
-            print(f"[COHERE][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
-            # Simple timeout around Cohere call
-            try:
-                timeout_s = int(os.getenv("OFERGPT_COHERE_TIMEOUT_SEC", "25"))
-            except Exception:
-                timeout_s = 20
-            if timeout_s and timeout_s > 0:
-                with cf.ThreadPoolExecutor(max_workers=1) as ex:
-                    fut = ex.submit(
-                        self.cohere_client.generate,
-                        prompt=prompt,
-                        temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
-                        max_tokens=300,
-                        p=0.9,
-                        stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
-                    )
-                    response = fut.result(timeout=timeout_s)
-            else:
-                response = self.cohere_client.generate(
-                    prompt=prompt,
-                    temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
-                    max_tokens=300,
-                    p=0.9,
-                    stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
-                )
-            # Log full response object (best-effort)
-            try:
-                print(f"[COHERE][RESPONSE] {response}", flush=True)
-            except Exception:
-                try:
-                    print(f"[COHERE][RESPONSE_DICT] {getattr(response, '__dict__', {})}", flush=True)
-                except Exception:
-                    pass
-            answer = response.generations[0].text.strip()
-            return answer
-        except cf.TimeoutError:
-            print("⏳ Cohere generate() timed out; returning fallback message.", flush=True)
-            return "I'm sorry, the request took too long. Please try again."
-        except Exception as e:
-            print(f"Error generating response: {e}")
-            return "I'm sorry, I'm having trouble generating a response right now. Please try again."
     
     def generate_response_with_memory(self, query: str, context: str, memory_context: str) -> str:
         """Generate response using Cohere with RAG context and conversation memory."""
@@ -336,17 +273,17 @@ Please provide a helpful response based STRICTLY on the context about Ofer:"""
                 mem_budget = 700
             mem_text = memory_context if memory_context else "This is the start of our conversation."
             mem_text = self._truncate(mem_text, mem_budget)
-            prompt = f"""{self.system_prompt}
-
-Previous conversation summary:
-{mem_text}
-
-Current context about Ofer:
-{context}
-
-User question: {query}
-
-Please provide a helpful response based STRICTLY on the context about Ofer and our previous conversation. DO NOT invent, assume, or make up any details not explicitly mentioned in the context above:"""
+            if context and context.strip():
+                prompt = f"{self.system_prompt}\n\nPrevious conversation summary:\n{mem_text}\n\nCurrent context about Ofer:\n{context}\n\nUser question: {query}\n\nPlease provide a helpful response based STRICTLY on the context about Ofer and our previous conversation. DO NOT invent, assume, or make up any details not explicitly mentioned in the context above:"
+            else:
+                # Smalltalk/casual mode (no RAG context)
+                prompt = (
+                    "You are bambi, a friendly, witty AI companion. The user is greeting or making small talk. "
+                    "Reply naturally, concise but personable, vary phrasing (no canned lines), and optionally ask a light follow-up.\n\n"
+                    f"Previous conversation summary:\n{mem_text}\n\n"
+                    f"User message: {query}\n\n"
+                    "Your response:"
+                )
             # Log full Cohere API call parameters
             params = {
                 "endpoint": "generate",
@@ -399,6 +336,70 @@ Please provide a helpful response based STRICTLY on the context about Ofer and o
             print(f"Error generating response with memory: {e}")
             return "I'm sorry, I'm having trouble generating a response right now. Please try again."
     
+    def _detect_intent_llm(self, query: str, memory_context: str) -> str:
+        """Use the LLM to classify high-level intent.
+
+        Returns one of: greeting, chitchat, nonsense, question, ofer_question.
+        Falls back to 'question' on any failure.
+        """
+        try:
+            instruction = (
+                "Classify the user's message into exactly one of these intents: "
+                "greeting, chitchat, nonsense, question, ofer_question. "
+                "Definitions: greeting = hello/hi/etc; chitchat = casual small talk; "
+                "nonsense = empty or meaningless; ofer_question = specifically about Ofer; "
+                "question = general question; ofer_question = specifically about Ofer. "
+                "Respond ONLY with the intent word, no punctuation, no explanation."
+            )
+            mem_text = memory_context or ""
+            prompt = (
+                f"Instruction: {instruction}\n\n"
+                f"Conversation summary (may be empty):\n{mem_text}\n\n"
+                f"User message:\n{query}\n\n"
+                "Intent:"
+            )
+            try:
+                timeout_s = int(os.getenv("OFERGPT_INTENT_TIMEOUT_SEC", "5"))
+            except Exception:
+                timeout_s = 5
+            # Safe logging without preview variable
+            try:
+                _prompt_len = len(prompt)
+            except Exception:
+                _prompt_len = -1
+            print(
+                f"[INTENT][REQUEST] timeout={timeout_s}s prompt_len={_prompt_len} max_tokens=8",
+                flush=True,
+            )
+            # Use Cohere Chat API (Generate is deprecated)
+            chat_kwargs = {
+                "message": prompt,
+                "temperature": 0.0,
+                "max_tokens": 8,
+            }
+            _chat_model = os.getenv("COHERE_CHAT_MODEL")
+            if _chat_model:
+                chat_kwargs["model"] = _chat_model
+
+            if timeout_s and timeout_s > 0:
+                with cf.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(self.cohere_client.chat, **chat_kwargs)
+                    resp = fut.result(timeout=timeout_s)
+            else:
+                resp = self.cohere_client.chat(**chat_kwargs)
+
+            raw_intent = (getattr(resp, "text", None) or "").strip()
+            print(f"[INTENT][RAW_RESPONSE] {raw_intent!r}", flush=True)
+            intent = raw_intent.lower()
+            if intent in self._intent_labels:
+                print(f"[INTENT][DECISION] intent={intent} (matched known labels)", flush=True)
+                return intent
+            print(f"[INTENT][DECISION] intent_unrecognized={intent!r} -> fallback='question'", flush=True)
+            return "question"
+        except Exception as e:
+            print(f"[INTENT] fallback due to error: {e}", flush=True)
+            return "question"
+
     def stream_response_with_memory(self, query: str, context: str, memory_context: str):
         """Generate streaming response using Cohere with RAG context and conversation memory."""
         import time
@@ -411,19 +412,28 @@ Please provide a helpful response based STRICTLY on the context about Ofer and o
                 mem_budget = 700
             mem_text = memory_context if memory_context else "This is the start of our conversation."
             mem_text = self._truncate(mem_text, mem_budget)
-            prompt = f"""{self.system_prompt}
-
-Previous conversation summary:
-{mem_text}
-
-Current context about Ofer:
-{context}
-
-Instruction: If a section labeled 'Cross-source' or enclosed by BEGIN/END CROSS-SOURCE appears above, prioritize it as primary evidence over other documents when answering. The context may contain multiple documents delimited by 'BEGIN DOC n' and 'END DOC n'. Treat each document as separate evidence; do not merge details across different documents unless they explicitly corroborate each other.
-
-User question: {query}
-
-Please provide a helpful response based STRICTLY on the context about Ofer and our previous conversation. DO NOT invent, assume, or make up any details not explicitly mentioned in the context above:"""
+            if context and context.strip():
+                prompt = (
+                    f"{self.system_prompt}\n\n"
+                    f"Previous conversation summary:\n{mem_text}\n\n"
+                    f"Current context about Ofer:\n{context}\n\n"
+                    "Instruction: If a section labeled 'Cross-source' or enclosed by BEGIN/END CROSS-SOURCE appears above, "
+                    "prioritize it as primary evidence over other documents when answering. The context may contain multiple "
+                    "documents delimited by 'BEGIN DOC n' and 'END DOC n'. Treat each document as separate evidence; do not "
+                    "merge details across different documents unless they explicitly corroborate each other.\n\n"
+                    f"User question: {query}\n\n"
+                    "Please provide a helpful response based STRICTLY on the context about Ofer and our previous conversation. "
+                    "DO NOT invent, assume, or make up any details not explicitly mentioned in the context above:"
+                )
+            else:
+                # Smalltalk/casual mode (no RAG context)
+                prompt = (
+                    "You are bambi, a friendly, witty AI companion. The user is greeting or making small talk. "
+                    "Reply naturally and briefly, keep it dynamic.\n\n"
+                    f"Previous conversation summary:\n{mem_text}\n\n"
+                    f"User message: {query}\n\n"
+                    "Your response:"
+                )
             try:
                 print("🚀 Attempting real Cohere streaming...", flush=True)
                 # Log full Cohere API call parameters for streaming
@@ -496,18 +506,21 @@ Please provide a helpful response based STRICTLY on the context about Ofer and o
             yield "I'm sorry, I'm having trouble generating a response right now. Please try again."
     
     def chat(self, user_input: str) -> str:
-        """Main chat method that combines RAG and memory."""
+        """Main chat method that combines intent routing, memory, and RAG."""
         # Normalize input
         user_input = user_input.strip()
-        # Get relevant context from RAG
-        context = self.get_relevant_context(user_input)
-        
-        # Get conversation memory context
+        # Pull memory first for intent detection context
         memory_context = self.memory.buffer
-        
-        # Generate response with enhanced context
-        response = self.generate_response_with_memory(user_input, context, memory_context)
-        
+        # LLM-based intent detection to optionally skip RAG
+        intent = self._detect_intent_llm(user_input, memory_context)
+        if intent in {"greeting", "chitchat", "nonsense"}:
+            # Smalltalk path: no RAG, call generator with empty context
+            response = self.generate_response_with_memory(user_input, "", memory_context)
+        else:
+            # Information-seeking: run RAG
+            context = self.get_relevant_context(user_input)
+            response = self.generate_response_with_memory(user_input, context, memory_context)
+
         # Update both memory systems
         self.memory.chat_memory.add_user_message(user_input)
         self.memory.chat_memory.add_ai_message(response)
@@ -519,18 +532,22 @@ Please provide a helpful response based STRICTLY on the context about Ofer and o
         return response
     
     def chat_stream(self, user_input: str):
-        """Main streaming chat method that combines RAG and memory."""
-        # Get relevant context from RAG
-        context = self.get_relevant_context(user_input)
-        
-        # Get conversation memory context
+        """Main streaming chat method with LLM-based intent routing to skip RAG for greetings/smalltalk."""
+        user_input = user_input.strip()
         memory_context = self.memory.buffer
-        
-        # Generate streaming response with enhanced context
+        intent = self._detect_intent_llm(user_input, memory_context)
         full_response = ""
-        for token in self.stream_response_with_memory(user_input, context, memory_context):
-            full_response += token
-            yield token
+        if intent in {"greeting", "chitchat", "nonsense"}:
+            # Smalltalk path: no RAG, stream with empty context
+            for token in self.stream_response_with_memory(user_input, "", memory_context):
+                full_response += token
+                yield token
+        else:
+            # Information-seeking: run RAG
+            context = self.get_relevant_context(user_input)
+            for token in self.stream_response_with_memory(user_input, context, memory_context):
+                full_response += token
+                yield token
         
         # Update both memory systems with the complete response
         self.memory.chat_memory.add_user_message(user_input)
@@ -633,8 +650,6 @@ Please provide a helpful response based STRICTLY on the context about Ofer and o
         """Get information about the knowledge base."""
         return self.rag_system.get_collection_info()
     
-    # Location cleaning removed
-    
     def clear_knowledge_base(self):
         """Clear all data from the knowledge base."""
         self.rag_system.clear_vector_store()
@@ -645,10 +660,6 @@ Please provide a helpful response based STRICTLY on the context about Ofer and o
         """Clear only the conversation memory, keep knowledge base."""
         self.memory.clear()
         self.conversation_history = []
-    
-    # Location CSV generation removed
-    
-    # Location summary removed
     
     def fix_photo_location(self, filename: str, new_location_name: str, new_coordinates: str = ""):
         """Fix the location for a specific photo."""
