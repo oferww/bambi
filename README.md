@@ -1,265 +1,165 @@
-# 🦌 Bambi - Personal AI Assistant
+# bambi
 
-A personalized chatbot that knows about you through RAG (Retrieval-Augmented Generation) using your photos, metadata, and memories. Built with Streamlit, LangChain, Cohere, and ChromaDB.
+A personal AI assistant that knows about Ofer’s life. It uses RAG (Retrieval Augmented Generation) over photos, PDFs, Instagram/CSV data, and text memories to answer questions, with a Streamlit frontend and a Cohere-powered backend.
 
-## ✨ Features
 
-- **Photo Analysis**: Automatically extracts metadata from photos (date, location, camera info)
-- **Memory Storage**: Add personal memories and experiences as text
-- **RAG System**: Uses Cohere embeddings and ChromaDB for intelligent retrieval
-- **Beautiful UI**: Modern Streamlit interface with chat functionality
-- **Docker Support**: Fully containerized for easy deployment
-- **Conversational AI**: Powered by Cohere's Command model
+## Features
+- __RAG over personal data__: Vector search via ChromaDB with Cohere embeddings.
+- __Chat with memory__: Conversation summary memory using LangChain and Cohere (`backend/chatbot.py`).
+- __PDF ingestion & summarization__: Extract, summarize, and embed PDFs (`backend/utils/pdf_processor.py`).
+- __Photo metadata ingestion__: Extract EXIF/location metadata for photos (`backend/utils/photo_processor.py`).
+- __S3 sync (optional)__: Pull embeddings from S3 on-demand from the UI or at startup.
+- __Streamlit UI__: Modern single-page chat interface (`frontend/app.py`).
+- __Docker support__: Reproducible container build and `docker-compose` for local run.
 
-## 🚀 Quick Start
 
-### Prerequisites
+## Architecture
+- __Frontend__: Streamlit app in `frontend/app.py` (port 8501 by default).
+- __Backend / Core__:
+  - `backend/chatbot.py`: `OferGPT` chat flow, intent detection, Cohere generation, RAG context assembly.
+  - `backend/rag_system.py`: ChromaDB vector store, Cohere embeddings, chunking, dedupe, CSV dumps.
+  - `backend/utils/pdf_processor.py`: PDF text extraction (PyPDF2/pdfplumber/pdfminer) and hierarchical summarization via Cohere.
+  - Additional utils for photos, S3 sync, ingestion helpers under `backend/utils/` and `backend/`.
+- __Data__: Embeddings and uploads in `data/` (created at runtime).
 
-- Docker and Docker Compose installed
-- Cohere API key (get one at [cohere.ai](https://cohere.ai/))
 
-### Setup
+## Requirements
+- Python 3.11+
+- Cohere API keys
+- (Optional) AWS S3 credentials (or S3-compatible endpoint) for embedding sync
 
-1. **Clone the repository**
-   ```bash
-   git clone <your-repo-url>
-   cd bambi
-   ```
-
-2. **Set up environment variables**
-   ```bash
-   cp env.example .env
-   ```
-   Edit `.env` and add your Cohere API key:
-   ```
-   COHERE_API_KEY_EMBED=your_cohere_api_key_here
-   COHERE_API_KEY_CHAT=your_cohere_api_key_here
-   ```
-
-3. **Add your data**
-   ```bash
-   mkdir -p data/uploads/photos
-   # Copy your photos to data/uploads/photos/
-   # Optional: place PDFs under data/uploads/pdfs, CSVs under data/uploads/csvs, JSON under data/uploads/json
-   ```
-
-4. **Run locally**
-   ```bash
-   pip install -r requirements.txt
-   streamlit run frontend/app.py
-   ```
-
-5. **Access the application**
-   Open your browser and go to `http://localhost:8501`
-
-## 📁 Project Structure
-
-```
-bambi/
-├── backend/
-│   ├── chatbot.py              # Chatbot (uses RAGSystem)
-│   ├── rag_system.py           # RAG system (Cohere + ChromaDB)
-│   ├── ingestion/
-│   │   └── dispatcher.py       # Central ingestion entrypoints for UI
-│   └── utils/                  # PDF/photo/JSON utilities
-├── frontend/
-│   └── app.py                  # Streamlit UI
-├── dev_tools/                  # Dev-only CLI scripts (excluded from Docker)
-├── tests/
-│   └── backend/
-│       ├── unit/
-│       └── integration/
-├── data/
-│   ├── uploads/
-│   │   ├── photos/
-│   │   ├── pdfs/
-│   │   ├── csvs/
-│   │   └── json/
-│   ├── embeddings/             # ChromaDB storage
-│   └── embeddings_dump.csv     # CSV dump of collection
-├── requirements.txt            # Python dependencies
-├── Dockerfile                  # Docker build
-├── .dockerignore               # Excludes dev_tools/ and tests/
-├── pytest.ini                  # Pytest config
-├── .env                        # Environment variables (gitignored)
-└── README.md                   # This file
-```
-
-## 🔧 Configuration
-
-### Environment Variables
-
-Create a `.env` file with:
-
-```env
-# Required
-COHERE_API_KEY_EMBED=your_cohere_api_key_here
-COHERE_API_KEY_CHAT=your_cohere_api_key_here
-
-# Optional UI/RAG settings
-OFERGPT_HIDE_SIDEBAR=0
-OFERGPT_RAG_CHUNK_SIZE=1500
-OFERGPT_RAG_CHUNK_OVERLAP=250
-
-# Optional: run one-time full S3 sync on server startup
-OFERGPT_S3_SYNC_ON_START=0
-S3_BUCKET=
-S3_PREFIX=
-# Preferred endpoint variable (e.g., Cloudflare R2)
-S3_ENDPOINT=
-# Legacy (still supported as fallback)
-S3_ENDPOINT_URL=
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
-AWS_DEFAULT_REGION=
-```
-
-### Supported Photo Formats
-
-- JPEG (.jpg, .jpeg)
-- PNG (.png)
-- GIF (.gif)
-- BMP (.bmp)
-- TIFF (.tiff)
-
-## 📸 Photo Metadata Extraction
-
-The system automatically extracts:
-
-- **Date taken** (from EXIF data)
-- **GPS coordinates** (location)
-- **Camera information** (model, make, settings)
-- **Image properties** (dimensions, format)
-
-## 💬 Usage
-
-### 1. Initialize the Chatbot
-- Click "🔄 Initialize Chatbot" in the sidebar
-- Ensure your Cohere API key is configured
-
-### 2. Add Files to Knowledge Base
-- Place your files under `data/uploads/` subfolders:
-  - Photos → `data/uploads/photos/`
-  - PDFs → `data/uploads/pdfs/`
-  - CSVs → `data/uploads/csvs/`
-  - JSON/NDJSON → `data/uploads/json/`
-- Use the sidebar buttons to ingest/embed.
-
-### 3. Add Personal Memories
-- Use the "Add Memories" section in the sidebar
-- Enter text memories about your experiences
-- These will be added to the knowledge base
-
-### 4. Start Chatting
-- Ask questions about your photos and memories
-- The AI will use RAG to find relevant information
-- Get personalized responses about your life and experiences
-
-## 🐳 Docker Deployment
-
-### Local Development
+Install dependencies locally:
 ```bash
-# Build image
-docker build -t bambi .
-
-# Run with environment variables and local data volume
-# Powershell (Windows):
-docker run --rm -p 8501:8501 \
-  --env-file .env \
-  -v ${PWD}/data:/app/data \
-  bambi
-
-# Bash (macOS/Linux):
-docker run --rm -p 8501:8501 \
-  --env-file .env \
-  -v $(pwd)/data:/app/data \
-  bambi
+pip install -r requirements.txt
 ```
 
-## 🔍 Programmatic Notes
+Dockerized runtime uses `requirements-base.txt` and `requirements-app.txt` for faster builds.
 
-The primary interface is the Streamlit UI (`frontend/app.py`), which calls backend ingestion via `backend/ingestion/dispatcher.py` and persists to ChromaDB via `RAGSystem`.
-Advanced users can import `RAGSystem` to add text memories or perform collection operations directly.
 
-## 🛠️ Development
+## Environment variables
+Create a `.env` at project root. Relevant variables used across the codebase:
 
-### Local Development Setup
+- __Cohere__
+  - `COHERE_API_KEY_EMBED` — required for embeddings
+  - `COHERE_API_KEY_CHAT` — required for chat/summarization
+  - `COHERE_CHAT_MODEL` — default `command-a-vision-07-2025` (see `backend/chatbot.py` / PDF summarizer)
 
-1. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+- __RAG / Chroma__
+  - `OFERGPT_RAG_TOP_K` — default 5
+  - `OFERGPT_RAG_MAX_DOCS` — default 5
+  - `OFERGPT_RAG_CONTEXT_CHAR_BUDGET` — default 3500
+  - `OFERGPT_RAG_PER_DOC_CHAR_CAP` — default 900
+  - `OFERGPT_RAG_CHUNK_SIZE` — default 1500
+  - `OFERGPT_RAG_CHUNK_OVERLAP` — default 250
+  - `OFERGPT_RERANK` — `1` to enable Cohere Rerank
+  - `OFERGPT_RERANK_TOP_K`, `OFERGPT_RERANK_MODEL` — rerank tuning
+  - `OFERGPT_RAG_TIMEOUT_SEC` — RAG retrieval timeout (default 20s)
 
-2. **Set environment variables**
-   ```bash
-   export COHERE_API_KEY_EMBED=your_key
-   export COHERE_API_KEY_CHAT=your_key
-   ```
+- __Chat / Memory__
+  - `OFERGPT_MEMORY_CHAR_BUDGET` — default 700
+  - `OFERGPT_COHERE_TIMEOUT_SEC` — Cohere generate timeout (default 25s)
+  - `OFERGPT_INTENT_TIMEOUT_SEC` — intent classifier timeout (default 5s)
 
-3. **Run locally**
-   ```bash
-   streamlit run app.py
-   ```
+- __PDF summarization__ (see `backend/utils/pdf_processor.py`)
+  - `PDF_SUMMARY_MODE` — `summarize|chat|off` (default `summarize`)
+  - `PDF_SUMMARY_CHUNK_SIZE` — default 4000
+  - `PDF_SUMMARY_CHUNK_OVERLAP` — default 200
+  - `PDF_SUMMARY_MAX_CHARS` — default 120000
+  - `PDF_SUMMARY_ENABLE_REDUCE` — `1` to enable final reduce pass
 
-### Adding New Features
+- __UI / Frontend__
+  - `OFERGPT_HIDE_SIDEBAR` — `1` to hide sidebar
 
-- **New photo processors**: Extend `utils/photo_processor.py`
-- **Additional RAG sources**: Modify `rag_system.py`
-- **UI improvements**: Update `app.py` and CSS
-- **New LLM models**: Update `chatbot.py`
+- __S3 sync (optional)__
+  - `S3_BUCKET`, `S3_PREFIX`, `S3_REGION`
+  - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` (if needed)
+  - `S3_ENDPOINT` (or legacy `S3_ENDPOINT_URL`)
+  - `OFERGPT_S3_SYNC_ON_START` — `1` to pull embeddings on server start
 
-## 🔒 Security Notes
+- __Other__
+  - `GOOGLE_APPLICATION_CREDENTIALS` — path to Google Vision credentials if used by other utils
+  - `PROJECT_ROOT` — optional; used in CSV dump path logic`
 
-- Never commit your `.env` file
-- Keep your Cohere API key secure
-- Photos are processed locally, not uploaded to external services
-- ChromaDB data is stored locally in `data/embeddings/`
 
-## 🤝 Contributing
+## Project layout
+```
+.
+├─ backend/
+│  ├─ chatbot.py               # Chat orchestration (Cohere + memory + RAG)
+│  ├─ rag_system.py            # Chroma vector store + embeddings + ingestion
+│  └─ utils/                   # PDF/photo/S3 and helpers
+├─ frontend/
+│  ├─ app.py                   # Streamlit UI entry
+│  └─ assets/                  # Images/icons (optional)
+├─ data/
+│  ├─ embeddings/              # ChromaDB persistent store
+│  └─ uploads/                 # photos/, pdfs/, csv/, json/
+├─ docker-compose.yml
+├─ Dockerfile
+├─ requirements.txt
+└─ .streamlit/config.toml
+```
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
 
-## 📝 License
+## Running locally
+1) Prepare `.env` with required keys.
+2) Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+3) Start the app:
+```bash
+streamlit run frontend/app.py --server.port=8501 --server.address=0.0.0.0
+```
+4) Open http://localhost:8501
 
-This project is licensed under the MIT License.
+Data folders will be created under `data/` on first run.
 
-## 🙏 Acknowledgments
 
-- [Cohere](https://cohere.ai/) for the LLM and embeddings
-- [Streamlit](https://streamlit.io/) for the web framework
-- [LangChain](https://langchain.com/) for the RAG framework
-- [ChromaDB](https://www.trychroma.com/) for vector storage
+## Running with Docker
+Build and run via Docker Compose (recommended):
+```bash
+docker compose up --build
+```
+- Binds port `8501:8501`.
+- Mounts project, `data/`, `.env`, and `keys/` into the container.
+- Honors environment knobs in `docker-compose.yml` (PDF summary tuning, UI flags, etc.).
 
-## 🆘 Troubleshooting
+Or build the image directly:
+```bash
+docker build -t bambi:latest .
+docker run --rm -p 8501:8501 --env-file .env -v %cd%/data:/app/data bambi:latest
+```
 
-### Common Issues
 
-1. **"Cohere API Key not found"**
-   - Ensure your `.env` file exists and contains the API key
-   - Check that the key is valid at [cohere.ai](https://cohere.ai/)
+## Data ingestion
+- __Photos__: Place image files under `data/uploads/photos/`. On startup or via utilities, new photos are embedded and their original files may be deleted after processing (see `RAGSystem.auto_sync_from_disk`).
+- __PDFs__: Place files under `data/uploads/pdfs/`. The processor extracts text, summarizes with Cohere, and embeds both summary and (optionally) raw content.
+- __CSV/JSON__: Ingestion helpers exist under `backend/ingestion.py` and `backend/utils/` (if present) to process Instagram/CSV sources.
+- __Manual ingestion__: Programmatically call `RAGSystem.add_document_descriptions()` and friends to add custom content.
 
-2. **"No photos found"**
-   - Make sure photos are in `data/photos/`
-   - Check file extensions are supported
+The Chroma store is persisted in `data/embeddings/`. A CSV snapshot `data/embeddings_dump.csv` is also produced for inspection.
 
-3. **"Error processing photos"**
-   - Ensure photos are not corrupted
-   - Check file permissions
 
-4. **Docker build fails**
-   - Ensure Docker is running
-   - Check internet connection for package downloads
+## S3 synchronization (optional)
+- Sidebar button “Sync from S3” calls `sync_s3_prefix_to_dir()` to pull embeddings into `./data/embeddings`.
+- To auto-sync on server start, set `OFERGPT_S3_SYNC_ON_START=1` and provide S3 credentials.
 
-### Getting Help
 
-- Check container logs: `docker logs <container_id>`
-- Verify environment variables: check `.env` and the `--env-file` used for `docker run`
-- Test API key: Use Cohere's playground
+## Testing
+Run tests (if present):
+```bash
+pytest -q
+```
 
----
 
-**Made with ❤️ for personal AI assistants**
+## Troubleshooting
+- __No answers or empty context__: Ensure `COHERE_API_KEY_EMBED` and `COHERE_API_KEY_CHAT` are set, and that `data/embeddings/` contains vectors.
+- __Chroma telemetry__: Telemetry is disabled at runtime in `backend/rag_system.py`.
+- __Large PDFs slow__: Tune `PDF_SUMMARY_*` envs to reduce API calls (larger chunks, fewer overlaps, lower cap).
+- __Sidebar hidden__: Unset `OFERGPT_HIDE_SIDEBAR` or set it to `0`.
+- __Port in use__: Change `--server.port` or update `docker-compose.yml` mapping.
+
+
+## Acknowledgements
+- Streamlit, LangChain, Cohere, ChromaDB.
