@@ -3,7 +3,8 @@
 </p>
 
 <p align="center">
-  A personal AI assistant that knows about Ofer’s life. It uses RAG (Retrieval Augmented Generation) over photos, PDFs, Instagram/CSV data, and text memories to answer questions, with a Streamlit frontend and a Cohere-powered backend.
+  A personal AI assistant that knows about Ofer’s life. <br>
+  It uses RAG (Retrieval Augmented Generation) over photos, PDFs, Instagram/CSV data, and text memories to answer questions, with a Streamlit frontend and a Cohere-powered backend.
 </p>
 
 ## Features
