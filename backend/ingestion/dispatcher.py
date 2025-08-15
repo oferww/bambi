@@ -623,7 +623,7 @@ def ingest_jsons_in_uploads(rag: RAGSystem, json_dir: str = "./data/uploads/json
 
 
 def ingest_photos_in_uploads(rag: RAGSystem, photos_dir: str = "./data/uploads/photos") -> int:
-    """Scan photos directory for images and embed new ones using RAGSystem.auto_sync_from_disk().
+    """Scan photos directory for images and embed new ones using RAGSystem.auto_sync_photos_from_disk().
     Returns number of newly added photos (best-effort estimate based on filenames before/after).
     """
     try:
@@ -635,7 +635,7 @@ def ingest_photos_in_uploads(rag: RAGSystem, photos_dir: str = "./data/uploads/p
             for m in data_before["metadatas"]:
                 if m and (m.get("type") == "photo" or (m.get("filename",""))):
                     names_before.add(m.get("filename", ""))
-        rag.auto_sync_from_disk(photos_dir=photos_dir)
+        rag.auto_sync_photos_from_disk(photos_dir=photos_dir)
         data_after = collection.get()
         names_after = set()
         if data_after and data_after.get("metadatas"):

@@ -5,7 +5,7 @@ from backend.chatbot import OferGPT
 from backend.utils.photo_processor import PhotoProcessor
 # Auto-create location embeddings on startup
 from backend.rag_system import RAGSystem
-from backend.utils.s3_sync import sync_s3_prefix_to_dir, sync_dir_to_s3_prefix
+from backend.utils.s3_sync import sync_embeddings_from_env
 import json
 from datetime import datetime
 import pandas as pd
@@ -101,44 +101,11 @@ def _next_placeholder():
 
 @st.cache_resource
 def run_s3_sync_once() -> bool:
-    """Run S3 pull"""
+    """Run a one-time S3 embeddings sync using backend utility and env vars."""
     try:
-        S3_BUCKET = os.getenv("S3_BUCKET")
-        if not S3_BUCKET:
-            print("[S3] Skipping: S3_BUCKET not configured", flush=True)
-            return False
-
-        S3_PREFIX = os.getenv("S3_PREFIX", "")
-        S3_REGION = os.getenv("S3_REGION")
-        AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-        AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-        AWS_SESSION_TOKEN = os.getenv("AWS_SESSION_TOKEN")
-        # Prefer S3_ENDPOINT; fall back to legacy S3_ENDPOINT_URL
-        S3_ENDPOINT = os.getenv("S3_ENDPOINT") or os.getenv("S3_ENDPOINT_URL")
-
-        # Normalize base prefix once
-        base_prefix = (S3_PREFIX or "").strip().strip("/")
-
-        # Always fetch embeddings on demand
-        embeddings_dir = "./data/embeddings"
-        os.makedirs(embeddings_dir, exist_ok=True)
-        embeddings_prefix = f"{base_prefix}/embeddings" if base_prefix else "embeddings"
-        print(f"[S3] Pulling embeddings: s3://{S3_BUCKET}/{embeddings_prefix} -> {embeddings_dir}", flush=True)
-        sync_s3_prefix_to_dir(
-            bucket=S3_BUCKET,
-            prefix=embeddings_prefix,
-            local_dir=embeddings_dir,
-            region=S3_REGION,
-            access_key=AWS_ACCESS_KEY_ID,
-            secret_key=AWS_SECRET_ACCESS_KEY,
-            session_token=AWS_SESSION_TOKEN,
-            endpoint_url=S3_ENDPOINT,
-            overwrite=False,
-        )
-
-        return True
+        return bool(sync_embeddings_from_env())
     except Exception as e:
-        print(f"[S3] Skipping S3 pull due to error: {e}", flush=True)
+        print(f"[S3] Error during sync: {e}", flush=True)
         return False
 
 # Optional one-time full sync on server start (controlled by a single flag)
@@ -515,25 +482,6 @@ def add_photos_to_knowledge_base():
         except Exception as e:
             st.error(f"❌ Error processing photos: {e}")
 
-def add_memory():
-    """Add a text memory to the knowledge base."""
-    if not st.session_state.chatbot:
-        st.error("Chatbot not initialized!")
-        return
-    
-    memory_text = st.text_area("Enter your memory:", height=100)
-    if st.button("Add Memory"):
-        if memory_text.strip():
-            try:
-                st.session_state.chatbot.add_memories_to_knowledge_base([memory_text])
-                st.success("✅ Memory added successfully!")
-                st.session_state.knowledge_base_initialized = True
-            except Exception as e:
-                st.error(f"❌ Error adding memory: {e}")
-        else:
-            st.warning("Please enter some text for the memory.")
-
-# Removed display_chat_message function - now using st.chat_message consistently
 
 # Main application
 def main():
@@ -563,20 +511,17 @@ def main():
             st.markdown("#### 📊 Knowledge Base Info")
             info = st.session_state.chatbot.get_knowledge_base_info()
             if "error" not in info:
-                # Show document counts side-by-side
-                col1, col2, col3, col4, col5 = st.columns(5)
+                col1, col2, col3, col4 = st.columns(4)
                 col1.metric("Total Docs", info.get("total_docs", 0))
                 col2.metric("Photos", info.get("num_photos", 0))
                 col3.metric("PDFs", info.get("num_pdfs", 0))
-                col4.metric("Memories", info.get("num_memories", 0))
-                col5.metric("Locations", info.get("num_locations", 0))
-                st.caption("Docs = unique photos, PDFs, memories, locations (not chunked)")
+                col4.metric("Locations", info.get("num_locations", 0))
+                st.caption("Docs = unique photos, PDFs, locations (not chunked)")
                 st.metric("Total RAG Chunks", info.get("total_rag_chunks", 0))
                 st.caption("Total number of vector store chunks (used for retrieval)")
                 st.metric("Collection", info.get("collection_name", "N/A"))
                 st.metric("Model", info.get("embedding_model", "N/A"))
 
-                # Live Country Stats removed
             else:
                 st.error(f"Error: {info['error']}")
             # Show chatbot status
@@ -882,43 +827,12 @@ def main():
                 else:
                     st.info("No Instagram posts found yet. Use '🧾 Embed JSONs' or 'Scan uploads' after placing posts_*.json in ./data/uploads.")
 
-                # # Maintenance actions
-                # col_ri, col_fix, col_rf = st.columns(3)
-                # with col_ri:
-                #     if st.button("♻️ Reingest Instagram (delete & import)"):
-                #         with st.spinner("Deleting existing Instagram docs and re-ingesting …"):
-                #             try:
-                #                 rag = st.session_state.chatbot.rag_system
-                #                 deleted = rag.delete_by_filter({"platform": "instagram"})
-                #                 added = ingest_jsons_in_uploads(rag)
-                #                 # After ingest, resolve locations from coordinates
-                #                 fixed = rag.fix_existing_instagram_locations()
-                #                 st.success(f"✅ Deleted {deleted}, added {added} and resolved {fixed} Instagram post(s)")
-                #                 st.rerun()
-                #             except Exception as e:
-                #                 st.error(f"❌ Reingest failed: {e}")
-                # with col_fix:
-                #     if st.button("🧭 Resolve Instagram locations (from coordinates)"):
-                #         try:
-                #             with st.spinner("Resolving Instagram locations…"):
-                #                 rag = st.session_state.chatbot.rag_system
-                #                 fixed = rag.fix_existing_instagram_locations()
-                #                 st.success(f"Resolved {fixed} Instagram post(s)")
-                #                 st.rerun()
-                #         except Exception as e:
-                #             st.error(f"Failed to resolve locations: {e}")
                 with col_rf:
                     if st.button("🔄 Refresh Instagram list"):
                         st.rerun()
             except Exception as e:
                 st.error(f"Error loading Instagram posts: {e}")
-
-            # Add memories
-            st.markdown("#### 💭 Add Memories")
-            add_memory()
-            
-            # Location Tracking and CSV removed
-            
+                        
             # Memory Management
             st.markdown("#### 🧠 Memory Management")
             
@@ -935,9 +849,7 @@ def main():
                 st.session_state.chat_history = []  # Clear Streamlit chat history too
                 st.success("✅ Conversation memory cleared!")
                 st.rerun()
-            
-            # Non-English location cleaning removed
-            
+                        
             # Clear knowledge base (also clears memory)
             if st.button("🗑️ Clear Knowledge Base", type="secondary"):
                 st.session_state.chatbot.clear_knowledge_base()
@@ -945,9 +857,7 @@ def main():
                 st.session_state.chat_history = []  # Clear Streamlit chat history too
                 st.success("Knowledge base and memory cleared!")
                 st.rerun()
-            
-            # Fix All Photo Locations removed
-        
+                    
             # Show memory summary for debugging
             if st.button("Show Memory Summary"):
                 if st.session_state.chatbot:

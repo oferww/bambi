@@ -4,7 +4,7 @@
 
 <p align="center">
   A personal AI assistant that knows about Ofer’s life. <br>
-  It uses RAG (Retrieval Augmented Generation) over photos, PDFs, Instagram/CSV data, and text memories to answer questions, with a Streamlit frontend and a Cohere-powered backend.
+  It uses RAG (Retrieval Augmented Generation) over photos, PDFs, and Instagram/CSV data, to answer questions, with a Streamlit frontend and a Cohere-powered backend.
 </p>
 
 ## Features
@@ -137,7 +137,7 @@ docker run --rm -p 8501:8501 --env-file .env -v %cd%/data:/app/data bambi:latest
 
 
 ## Data ingestion
-- __Photos__: Place image files under `data/uploads/photos/`. On startup or via utilities, new photos are embedded and their original files may be deleted after processing (see `RAGSystem.auto_sync_from_disk`).
+- __Photos__: Place image files under `data/uploads/photos/`. On startup or via utilities, new photos are embedded and their original files may be deleted after processing (see `RAGSystem.auto_sync_photos_from_disk`).
 - __PDFs__: Place files under `data/uploads/pdfs/`. The processor extracts text, summarizes with Cohere, and embeds both summary and (optionally) raw content.
 - __CSV/JSON__: Ingestion helpers exist under `backend/ingestion.py` and `backend/utils/` (if present) to process Instagram/CSV sources.
 - __Manual ingestion__: Programmatically call `RAGSystem.add_document_descriptions()` and friends to add custom content.

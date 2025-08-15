@@ -177,3 +177,55 @@ def sync_dir_to_s3_prefix(
 
     print(f"[S3] Upload sync complete. Files uploaded/updated: {uploaded}", flush=True)
     return uploaded
+
+
+def sync_embeddings_from_env() -> bool:
+    """Fetch embeddings directory from S3 to ./data/embeddings using environment variables.
+
+    Reads the following env vars:
+      - S3_BUCKET (required)
+      - S3_PREFIX (optional)
+      - S3_REGION (optional)
+      - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN (optional)
+      - S3_ENDPOINT or S3_ENDPOINT_URL (optional)
+
+    Returns True if the sync attempt completed without error (even if nothing changed).
+    """
+    try:
+        S3_BUCKET = os.getenv("S3_BUCKET")
+        if not S3_BUCKET:
+            print("[S3] Skipping: S3_BUCKET not configured", flush=True)
+            return False
+
+        S3_PREFIX = os.getenv("S3_PREFIX", "")
+        S3_REGION = os.getenv("S3_REGION")
+        AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+        AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+        AWS_SESSION_TOKEN = os.getenv("AWS_SESSION_TOKEN")
+        # Prefer S3_ENDPOINT; fall back to legacy S3_ENDPOINT_URL
+        S3_ENDPOINT = os.getenv("S3_ENDPOINT") or os.getenv("S3_ENDPOINT_URL")
+
+        # Normalize base prefix once
+        base_prefix = (S3_PREFIX or "").strip().strip("/")
+
+        # Always fetch embeddings on demand
+        embeddings_dir = "./data/embeddings"
+        os.makedirs(embeddings_dir, exist_ok=True)
+        embeddings_prefix = f"{base_prefix}/embeddings" if base_prefix else "embeddings"
+        print(f"[S3] Pulling embeddings: s3://{S3_BUCKET}/{embeddings_prefix} -> {embeddings_dir}", flush=True)
+        downloaded = sync_s3_prefix_to_dir(
+            bucket=S3_BUCKET,
+            prefix=embeddings_prefix,
+            local_dir=embeddings_dir,
+            region=S3_REGION,
+            access_key=AWS_ACCESS_KEY_ID,
+            secret_key=AWS_SECRET_ACCESS_KEY,
+            session_token=AWS_SESSION_TOKEN,
+            endpoint_url=S3_ENDPOINT,
+            overwrite=False,
+        )
+        # Consider the attempt successful regardless of whether files changed
+        return True
+    except Exception as e:
+        print(f"[S3] Error syncing embeddings from env: {e}", flush=True)
+        return False

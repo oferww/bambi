@@ -573,10 +573,6 @@ class OferGPT:
         
         return len(photos_metadata)
     
-    def add_memories_to_knowledge_base(self, memories: List[str]):
-        """Add text memories to the knowledge base."""
-        self.rag_system.add_text_memories(memories)
-    
     def add_pdf_to_knowledge_base(self, pdf_file, filename: str) -> bool:
         """Add a PDF document to the knowledge base."""
         try:
@@ -664,26 +660,3 @@ class OferGPT:
         """Clear only the conversation memory, keep knowledge base."""
         self.memory.clear()
         self.conversation_history = []
-    
-    def fix_photo_location(self, filename: str, new_location_name: str, new_coordinates: str = ""):
-        """Fix the location for a specific photo."""
-        try:
-            success = self.rag_system.update_photo_location(filename, new_location_name, new_coordinates)
-            if success:
-                print(f"✅ Fixed location for {filename}: {new_location_name}", flush=True)
-                return True
-            else:
-                print(f"❌ Failed to fix location for {filename}", flush=True)
-                return False
-        except Exception as e:
-            print(f"Error fixing photo location: {e}", flush=True)
-            return False
-    
-    def fix_existing_photo_locations(self):
-        """Fix all existing photos that have coordinates instead of location names."""
-        try:
-            self.rag_system.fix_existing_photo_locations()
-            return True
-        except Exception as e:
-            print(f"Error fixing existing photo locations: {e}", flush=True)
-            return False

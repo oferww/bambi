@@ -81,8 +81,9 @@ class RAGSystem:
             raise ValueError(
                 "Missing Cohere API key. Set COHERE_API_KEY_EMBED and COHERE_API_KEY_CHAT."
             )
+        self.embedding_model_name = "embed-english-v3.0"
         self.embeddings = CohereEmbeddings(
-            model="embed-english-v3.0",
+            model=self.embedding_model_name,
             cohere_api_key=self.cohere_key_embed
         )
         
@@ -111,9 +112,16 @@ class RAGSystem:
         try:
             import os as _os
             if _os.getenv("OFERGPT_RAG_AUTOSYNC", "0") == "1":
-                self.auto_sync_from_disk()
+                self.auto_sync_photos_from_disk()
         except Exception as _e:
-            print(f"[INIT] Skipping auto_sync_from_disk due to error: {_e}")
+            print(f"[INIT] Skipping auto_sync_photos_from_disk due to error: {_e}")
+
+
+### Helper utilities ###
+
+
+    def _hash_str(s: str) -> str:
+        return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
 
     def _collect_existing_idempotency_keys(self) -> set:
         """Collect existing idempotency keys from the collection for dedupe."""
@@ -131,9 +139,6 @@ class RAGSystem:
         except Exception as e:
             print(f"[DEDUPE] Could not list existing keys: {e}")
         return keys
-
-    def _hash_str(self, s: str) -> str:
-        return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
     
     def _process_metadata_for_chromadb(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Process metadata to be ChromaDB-compatible while preserving location info."""
@@ -254,6 +259,61 @@ class RAGSystem:
         except Exception as e:
             print(f"⚠️  Could not dump embeddings CSV: {e}")
 
+    def _doc_key(doc: Document) -> str:
+                meta = doc.metadata or {}
+                key = (
+                    meta.get("idempotency_key")
+                    or meta.get("filename")
+                    or hashlib.md5(
+                        (doc.page_content[:200] + json.dumps(meta, sort_keys=True, ensure_ascii=False)).encode("utf-8")
+                    ).hexdigest()
+                )
+                return key
+
+    def _extract_single_query(text: str, original: str) -> str:
+                            # Helper to sanitize and extract a single corrected query
+                            t = text.strip()                            # Remove common prefixes/labels
+                            for prefix in [
+                                "Corrected query:",
+                                "Correction:",
+                                "Corrected:",
+                                "Query:",
+                            ]:
+                                if t.lower().startswith(prefix.lower()):
+                                    t = t[len(prefix):].strip()
+                            # Strip wrapping quotes/backticks/brackets
+                            t = t.strip().strip("`")
+                            if t.startswith("[") and t.endswith("]"):
+                                inner = t[1:-1]
+                                parts = [p.strip().strip("'\"") for p in inner.split(",") if p.strip()]
+                                candidates = parts if parts else [t]
+                            else:
+                                lines = [ln.strip().strip("-• ").strip("'\"") for ln in t.splitlines() if ln.strip()]
+                                candidates = lines if len(lines) > 1 else [t]
+
+                            # Choose candidate with highest token overlap to original
+                            orig_tokens = set(original.lower().split())
+                            best = None
+                            best_score = -1
+                            for cand in candidates:
+                                tokens = set(cand.lower().split())
+                                score = len(tokens & orig_tokens)
+                                if best is None or score > best_score:
+                                    best = cand
+                                    best_score = score
+                            return (best or original).strip("'\"")
+
+    def _is_proper_like(tok: str) -> bool:
+        # Guard against introducing new proper-name tokens not present in original
+        if not tok or not any(c.isalpha() for c in tok):
+            return False
+        # Titlecase (John), ALLCAPS (IBM), or Mixed with leading capital
+        return tok[:1].isupper() or (tok.isupper() and len(tok) > 1)
+            
+
+    ### Document/Photo/PDF processing ###
+
+
     def add_document_descriptions(self, doc_descriptions: List[Dict[str, Any]]):
         """Add generic document descriptions (photos, Instagram, IMDb, CSV rows, PDFs, etc.) to the vector store with deduplication."""
         documents = []
@@ -326,75 +386,6 @@ class RAGSystem:
         # update CSV dump
         self._dump_embeddings_csv()
     
-    def add_text_memories(self, memories: List[str]):
-        """Add text memories to the vector store."""
-        documents = []
-
-        existing_keys = self._collect_existing_idempotency_keys()
-
-        for i, memory in enumerate(memories):
-            raw_key = f"text_memory:{i}:{self._hash_str(memory[:2048])}"
-            if raw_key in existing_keys:
-                print(f"Skipping duplicate text memory {i} by idempotency_key")
-                continue
-            metadata = {"type": "text_memory", "id": i, "idempotency_key": raw_key}
-            filtered_metadata = self._process_metadata_for_chromadb(metadata)
-
-            doc = Document(
-                page_content=memory,
-                metadata=filtered_metadata
-            )
-            documents.append(doc)
-        
-        # Split documents into chunks
-        split_docs = self.text_splitter.split_documents(documents)
-        
-        # Add to vector store
-        self.vectorstore.add_documents(split_docs)
-        
-        print(f"Added {len(split_docs)} text memory chunks to vector store")
-        self._dump_embeddings_csv()
-    
-    def auto_sync_from_disk(self, photos_dir: str = "./data/uploads/photos") -> None:
-        """Embed new photos in the data folder and enrich missing metadata for existing ones."""
-        try:
-            photo_processor = PhotoProcessor(photos_dir)
-            existing_files = self._get_existing_filenames()
-            new_descs = []
-
-            # Pass 1: embed new photos
-            for fname in os.listdir(photos_dir):
-                if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff")):
-                    continue
-                if fname in existing_files:
-                    continue
-                file_path = os.path.join(photos_dir, fname)
-                meta = photo_processor.extract_metadata(file_path)
-                if not meta:
-                    # rejected by processor (e.g., no location)
-                    continue
-                # Ensure only metadata is stored; do not persist original file path
-                try:
-                    meta.pop("file_path", None)
-                except Exception:
-                    pass
-                meta["type"] = meta.get("type") or "photo"
-                content = json.dumps(meta, ensure_ascii=False)
-                new_descs.append({"content": content, "metadata": meta})
-                # Delete the original file after processing to avoid storing heavy images on disk
-                try:
-                    os.remove(file_path)
-                except Exception as _e:
-                    print(f"[SYNC] Warning: could not delete image '{file_path}': {_e}")
-
-            if new_descs:
-                print(f"[SYNC] Adding {len(new_descs)} new photos to vector store", flush=True)
-                self.add_document_descriptions(new_descs)
-            else:
-                print("[SYNC] No new photos to embed", flush=True)
-        except Exception as e:
-            print(f"[SYNC] Error in auto_sync_from_disk: {e}", flush=True)
-
     def add_pdf_documents(self, pdf_descriptions: List[Dict[str, Any]]):
         """Add PDF documents to the vector store."""
         documents = []
@@ -437,7 +428,51 @@ class RAGSystem:
         
         print(f"Added {len(split_docs)} PDF document chunks to vector store")
         self._dump_embeddings_csv()
+
+    def auto_sync_photos_from_disk(self, photos_dir: str = "./data/uploads/photos") -> None:
+        """Embed new photos in the data folder and enrich missing metadata for existing ones."""
+        try:
+            photo_processor = PhotoProcessor(photos_dir)
+            existing_files = self._get_existing_filenames()
+            new_descs = []
+
+            # Pass 1: embed new photos
+            for fname in os.listdir(photos_dir):
+                if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff")):
+                    continue
+                if fname in existing_files:
+                    continue
+                file_path = os.path.join(photos_dir, fname)
+                meta = photo_processor.extract_metadata(file_path)
+                if not meta:
+                    # rejected by processor (e.g., no location)
+                    continue
+                # Ensure only metadata is stored; do not persist original file path
+                try:
+                    meta.pop("file_path", None)
+                except Exception:
+                    pass
+                meta["type"] = meta.get("type") or "photo"
+                content = json.dumps(meta, ensure_ascii=False)
+                new_descs.append({"content": content, "metadata": meta})
+                # Delete the original file after processing to avoid storing heavy images on disk
+                try:
+                    os.remove(file_path)
+                except Exception as _e:
+                    print(f"[SYNC] Warning: could not delete image '{file_path}': {_e}")
+
+            if new_descs:
+                print(f"[SYNC] Adding {len(new_descs)} new photos to vector store", flush=True)
+                self.add_document_descriptions(new_descs)
+            else:
+                print("[SYNC] No new photos to embed", flush=True)
+        except Exception as e:
+            print(f"[SYNC] Error in auto_sync_photos_from_disk: {e}", flush=True)
+
+
+    ### Search Query ###
     
+
     def search_similar(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
         """Search for similar content with typo/misspelling robustness.
 
@@ -484,58 +519,19 @@ class RAGSystem:
                         resp = c.chat(model=model_name, message=f"{system_instr}\n\nQuery: {original}", temperature=0)
                     if hasattr(resp, "text") and isinstance(resp.text, str) and resp.text.strip():
                         raw = resp.text.strip()
-                        # Helper to sanitize and extract a single corrected query
-                        def _extract_single_query(text: str, original: str) -> str:
-                            t = text.strip()                            # Remove common prefixes/labels
-                            for prefix in [
-                                "Corrected query:",
-                                "Correction:",
-                                "Corrected:",
-                                "Query:",
-                            ]:
-                                if t.lower().startswith(prefix.lower()):
-                                    t = t[len(prefix):].strip()
-                            # Strip wrapping quotes/backticks/brackets
-                            t = t.strip().strip("`")
-                            if t.startswith("[") and t.endswith("]"):
-                                inner = t[1:-1]
-                                parts = [p.strip().strip("'\"") for p in inner.split(",") if p.strip()]
-                                candidates = parts if parts else [t]
-                            else:
-                                lines = [ln.strip().strip("-• ").strip("'\"") for ln in t.splitlines() if ln.strip()]
-                                candidates = lines if len(lines) > 1 else [t]
 
-                            # Choose candidate with highest token overlap to original
-                            orig_tokens = set(original.lower().split())
-                            best = None
-                            best_score = -1
-                            for cand in candidates:
-                                tokens = set(cand.lower().split())
-                                score = len(tokens & orig_tokens)
-                                if best is None or score > best_score:
-                                    best = cand
-                                    best_score = score
-                            return (best or original).strip("'\"")
-
-                        corrected = _extract_single_query(raw, original)
+                        corrected = self._extract_single_query(raw, original)
             except Exception as ce:
                 print(f"[RAG] Spell-correction skipped due to error: {ce}")
 
             # Safety guard: only accept corrected if it's close to the original
             try:
                 corr_norm = (corrected or "").strip()
-                # Guard against introducing new proper-name tokens not present in original
-                def _is_proper_like(tok: str) -> bool:
-                    if not tok or not any(c.isalpha() for c in tok):
-                        return False
-                    # Titlecase (John), ALLCAPS (IBM), or Mixed with leading capital
-                    return tok[:1].isupper() or (tok.isupper() and len(tok) > 1)
-
                 orig_tokens_raw = original.split()
                 corr_tokens_raw = corr_norm.split()
                 orig_lc = {t.lower().strip("'\".,!?():;[]{}") for t in orig_tokens_raw}
                 corr_lc = [(t, t.lower().strip("'\".,!?():;[]{}")) for t in corr_tokens_raw]
-                introduced_proper = any(_is_proper_like(t) and lc not in orig_lc for t, lc in corr_lc)
+                introduced_proper = any(self._is_proper_like(t) and lc not in orig_lc for t, lc in corr_lc)
                 if introduced_proper:
                     corr_norm = original
                 # Similarity metrics
@@ -571,16 +567,7 @@ class RAGSystem:
             # 3) Perform searches and merge results with preference for corrected pass
             merged: Dict[str, Dict[str, Any]] = {}
 
-            def _doc_key(doc: Document) -> str:
-                meta = doc.metadata or {}
-                key = (
-                    meta.get("idempotency_key")
-                    or meta.get("filename")
-                    or hashlib.md5(
-                        (doc.page_content[:200] + json.dumps(meta, sort_keys=True, ensure_ascii=False)).encode("utf-8")
-                    ).hexdigest()
-                )
-                return key
+            
             
             for idx, q in enumerate(queries):
                 try:
@@ -630,7 +617,10 @@ class RAGSystem:
         except Exception as e:
             print(f"Error searching vector store: {e}")
             return []
- 
+    
+
+    ### Collection info ###
+
     
     def get_collection_info(self) -> Dict[str, Any]:
         """Get information about the vector store collection."""
@@ -640,10 +630,9 @@ class RAGSystem:
             result = collection.get()
             metadatas = result.get('metadatas', []) if result else []
 
-            # Count unique photos, pdfs, and memories
+            # Count unique photos, pdfs, and locations
             photo_filenames = set()
             pdf_filenames = set()
-            memory_ids = set()
             image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp')
             num_locations = 0
             for meta in metadatas:
@@ -657,144 +646,24 @@ class RAGSystem:
                         photo_filenames.add(meta['filename'])
                 elif t == 'pdf_document' and meta.get('filename'):
                     pdf_filenames.add(meta['filename'])
-                elif t == 'text_memory':
-                    memory_ids.add(meta.get('id', ''))
                 elif t == 'location':
                     num_locations += 1
 
             num_photos = len(photo_filenames)
             num_pdfs = len(pdf_filenames)
-            num_memories = len(memory_ids)
-            total_docs = num_photos + num_pdfs + num_memories + num_locations
+            total_docs = num_photos + num_pdfs + num_locations
 
             return {
                 "total_rag_chunks": count,
                 "num_photos": num_photos,
                 "num_pdfs": num_pdfs,
-                "num_memories": num_memories,
                 "num_locations": num_locations,
-                "total_docs": total_docs
+                "total_docs": total_docs,
+                "collection_name": "ofergpt_memories",
+                "embedding_model": getattr(self, "embedding_model_name", "unknown")
             }
         except Exception as e:
             return {"error": str(e)}
-    
-
-    def clean_non_english_locations(self):
-        """Remove documents with non-English location names and re-process."""
-        try:
-            # Get all documents
-            collection = self.chroma_client.get_or_create_collection("ofergpt_memories")
-            result = collection.get()
-            
-            if not result or not result.get('metadatas'):
-                print("No documents found in collection")
-                return
-            
-            # Find documents with non-English location names
-            non_english_docs = []
-            doc_data = list(zip(result['ids'], result['documents'], result['metadatas']))
-            
-            for doc_id, content, metadata in doc_data:
-                if metadata and 'location_name' in metadata:
-                    location_name = metadata['location_name']
-                    # Check if location name contains non-ASCII characters (Thai, etc.)
-                    try:
-                        location_name.encode('ascii')
-                    except UnicodeEncodeError:
-                        non_english_docs.append(doc_id)
-                        print(f"Found non-English location: {location_name}")
-            
-            # Remove non-English documents
-            if non_english_docs:
-                collection.delete(ids=non_english_docs)
-                print(f"Removed {len(non_english_docs)} documents with non-English locations")
-                print("Please re-process your photos to get English location names")
-            else:
-                print("No non-English location names found")
-                
-        except Exception as e:
-            print(f"Error cleaning non-English locations: {e}")
-    
-    def extract_all_locations(self) -> List[Dict[str, Any]]:
-        """Extract all unique locations from photos in the vector store."""
-        try:
-            collection = self.chroma_client.get_or_create_collection("ofergpt_memories")
-            result = collection.get()
-            
-            if not result or not result.get('metadatas'):
-                return []
-            
-            locations = []
-            seen_locations = set()
-            
-            for metadata in result['metadatas']:
-                if not metadata:
-                    continue
-                
-                # Check for location data in metadata
-                location_name = metadata.get('location_name')
-                if location_name and location_name.lower() not in seen_locations:
-                    seen_locations.add(location_name.lower())
-                    
-                    location_data = {
-                        'location_name': location_name,
-                        'latitude': metadata.get('latitude', ''),
-                        'longitude': metadata.get('longitude', ''),
-                        'coordinates': metadata.get('coordinates', ''),
-                        'source': 'existing_photos',
-                        'confidence': 'high'
-                    }
-                    
-                    # Try to get date from metadata
-                    date_taken = metadata.get('date_taken', '')
-                    filename = metadata.get('filename', '')
-                    
-                    location_data['visit_date'] = date_taken
-                    location_data['photo_filename'] = filename
-                    
-                    locations.append(location_data)
-            
-            print(f"Extracted {len(locations)} unique locations from vector store")
-            return locations
-            
-        except Exception as e:
-            print(f"Error extracting locations: {e}")
-            return []
-
-    def update_photo_location(self, filename: str, new_location_name: str, new_coordinates: str = ""):
-        """Update the location for a specific photo in the vector store."""
-        try:
-            collection = self.chroma_client.get_or_create_collection("ofergpt_memories")
-            result = collection.get()
-            
-            updated_count = 0
-            for doc_id, metadata in zip(result['ids'], result['metadatas']):
-                if metadata and metadata.get('filename') == filename:
-                    # Update the metadata
-                    metadata['location_name'] = new_location_name
-                    if new_coordinates:
-                        metadata['coordinates'] = new_coordinates
-                        # Parse coordinates if provided
-                        if ', ' in new_coordinates:
-                            lat, lon = new_coordinates.split(', ')
-                            metadata['latitude'] = lat.strip()
-                            metadata['longitude'] = lon.strip()
-                    
-                    # Update in ChromaDB
-                    collection.update(
-                        ids=[doc_id],
-                        metadatas=[metadata]
-                    )
-                    updated_count += 1
-                    print(f"Updated location for {filename}: {new_location_name}")
-            
-            if updated_count == 0:
-                print(f"No photo found with filename: {filename}")
-            else:
-                print(f"Updated {updated_count} documents for {filename}")
-                
-        except Exception as e:
-            print(f"Error updating photo location: {e}")
 
     def clear_vector_store(self):
         """Clear all data from the vector store and re-initialize an empty collection so subsequent operations don't fail."""
@@ -817,92 +686,3 @@ class RAGSystem:
         except Exception as e:
             print(f"Error clearing vector store: {e}", flush=True)
 
-    def delete_by_filter(self, where: dict) -> int:
-        """Delete documents from the collection matching a metadata filter. Returns number deleted (best-effort)."""
-        try:
-            collection = self.chroma_client.get_or_create_collection("ofergpt_memories")
-            # Pre-count matching ids
-            to_delete = collection.get(where=where, include=["metadatas", "ids"]) or {}
-            ids = to_delete.get("ids", []) or []
-            count = len(ids)
-            collection.delete(where=where)
-            print(f"[DELETE] Deleted {count} docs where={where}", flush=True)
-            return count
-        except Exception as e:
-            print(f"[DELETE] Error deleting where={where}: {e}", flush=True)
-            return 0
-
-    def fix_existing_photo_locations(self):
-        """Fix existing photos that have coordinates instead of location names."""
-        try:
-            from .utils.photo_processor import PhotoProcessor
-            
-            print("[FIX] Starting to fix existing photo locations...", flush=True)
-            
-            # Get all documents
-            collection = self.chroma_client.get_or_create_collection("ofergpt_memories")
-            result = collection.get()
-            
-            if not result or not result.get('metadatas'):
-                print("[FIX] No documents found in collection", flush=True)
-                return
-            
-            photo_processor = PhotoProcessor()
-            fixed_count = 0
-            total_photos = 0
-            
-            # Process each document
-            for doc_id, content, metadata in zip(result['ids'], result['documents'], result['metadatas']):
-                if not metadata:
-                    continue
-                
-                # Only process photos
-                if metadata.get('type') != 'photo':
-                    continue
-                
-                total_photos += 1
-                filename = metadata.get('filename', '')
-                location_name = metadata.get('location_name', '')
-                
-                # Check if location is coordinates (contains numbers and commas)
-                if location_name and ',' in location_name and any(c.isdigit() for c in location_name):
-                    print(f"[FIX] Found photo with coordinates: {filename} -> {location_name}", flush=True)
-                    
-                    try:
-                        # Parse coordinates
-                        coords = location_name.split(',')
-                        if len(coords) == 2:
-                            lat = float(coords[0].strip())
-                            lon = float(coords[1].strip())
-                            
-                            print(f"[FIX] Parsed coordinates: lat={lat}, lon={lon}", flush=True)
-                            
-                            # Try to get proper location name
-                            new_location_name = photo_processor._get_location_name(lat, lon)
-                            
-                            if new_location_name and new_location_name != location_name:
-                                # Update the metadata
-                                metadata['location_name'] = new_location_name
-                                
-                                # Update in ChromaDB
-                                collection.update(
-                                    ids=[doc_id],
-                                    metadatas=[metadata]
-                                )
-                                
-                                print(f"[FIX] ✅ Fixed {filename}: {location_name} -> {new_location_name}", flush=True)
-                                fixed_count += 1
-                            else:
-                                print(f"[FIX] ⚠️ Could not improve location for {filename}: {location_name}", flush=True)
-                        else:
-                            print(f"[FIX] ⚠️ Invalid coordinate format for {filename}: {location_name}", flush=True)
-                            
-                    except Exception as e:
-                        print(f"[FIX] ❌ Error fixing {filename}: {e}", flush=True)
-                else:
-                    print(f"[FIX] Skipping {filename} - already has location name: {location_name}", flush=True)
-            
-            print(f"[FIX] Completed! Fixed {fixed_count} out of {total_photos} photos", flush=True)
-            
-        except Exception as e:
-            print(f"[FIX] Error in fix_existing_photo_locations: {e}", flush=True)
