@@ -79,7 +79,7 @@ class RAGSystem:
         self.cohere_key_chat = api_key_chat
         if not self.cohere_key_embed or not self.cohere_key_chat:
             raise ValueError(
-                "Missing Cohere API key. Set COHERE_API_KEY_EMBED or COHERE_API_KEY_CHAT."
+                "Missing Cohere API key. Set COHERE_API_KEY_EMBED and COHERE_API_KEY_CHAT."
             )
         self.embeddings = CohereEmbeddings(
             model="embed-english-v3.0",
