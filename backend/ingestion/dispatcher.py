@@ -13,6 +13,9 @@ from ..utils.pdf_processor import PDFProcessor
 from ..utils.photo_processor import PhotoProcessor
 
 
+### Utilities and type detection ###
+
+
 def _is_image(name: str, mime: str | None) -> bool:
     name_l = name.lower()
     if mime and mime.startswith("image/"):
@@ -30,10 +33,6 @@ def _is_csv(name: str, mime: str | None) -> bool:
     return (mime in ("text/csv", "application/vnd.ms-excel")) or name_l.endswith(".csv")
 
 
-def _extract_hashtags(text: str) -> list:
-    return re.findall(r"#(\w+)", text or "")
-
-
 def _to_iso(ts_val) -> str:
     try:
         # Instagram exports are often epoch seconds
@@ -45,6 +44,27 @@ def _to_iso(ts_val) -> str:
         return datetime.fromisoformat(str(ts_val)).astimezone(timezone.utc).isoformat()
     except Exception:
         return ""
+
+
+def _to_iso_date(s: str) -> str:
+    """Parse common date formats to YYYY-MM-DD; return empty string on failure."""
+    if not s:
+        return ""
+    try:
+        return datetime.fromisoformat(s.strip()).date().isoformat()
+    except Exception:
+        pass
+    try:
+        return datetime.strptime(s.strip(), "%m/%d/%Y").date().isoformat()
+    except Exception:
+        return ""
+
+
+def _extract_hashtags(text: str) -> list:
+    return re.findall(r"#(\w+)", text or "")
+
+
+### CSV ingestion helpers ###
 
 
 def _is_imdb_ratings_csv(path: str) -> bool:
@@ -61,23 +81,6 @@ def _is_imdb_ratings_csv(path: str) -> bool:
         return required.issubset(set(header))
     except Exception:
         return False
-
-
-# Locations CSV embedding feature removed
-
-
-def _to_iso_date(s: str) -> str:
-    """Parse common date formats to YYYY-MM-DD; return empty string on failure."""
-    if not s:
-        return ""
-    try:
-        return datetime.fromisoformat(s.strip()).date().isoformat()
-    except Exception:
-        pass
-    try:
-        return datetime.strptime(s.strip(), "%m/%d/%Y").date().isoformat()
-    except Exception:
-        return ""
 
 
 def _ingest_imdb_ratings_csv(path: str, rag: RAGSystem) -> int:
@@ -251,6 +254,9 @@ def _ingest_generic_csv(path: str, rag: RAGSystem) -> int:
         return 0
 
 
+### JSON ingestion helpers ###
+
+
 def _ingest_instagram_posts_json(path: str, rag: RAGSystem) -> int:
     """Ingest Instagram posts JSON, treating each as a 'photo-like' document without an image."""
     try:
@@ -330,6 +336,14 @@ def _ingest_instagram_posts_json(path: str, rag: RAGSystem) -> int:
             "timestamp": iso_ts,
             "caption": caption,
         }
+        # Extract hashtags from caption and attach to metadata/payload
+        hashtags = []
+        try:
+            hashtags = _extract_hashtags(caption)
+            if hashtags:
+                meta["hashtags"] = hashtags
+        except Exception:
+            hashtags = []
         if post_id:
             meta["instagram_id"] = post_id
         # attach coordinates if available
@@ -369,6 +383,8 @@ def _ingest_instagram_posts_json(path: str, rag: RAGSystem) -> int:
             "timestamp": iso_ts,
             "coordinates": ({"lat": lat, "lon": lon} if (lat is not None and lon is not None) else None),
         }
+        if hashtags:
+            payload["hashtags"] = hashtags
         if location_name:
             payload["location_name"] = location_name
         content = json.dumps(payload, ensure_ascii=False)
@@ -383,110 +399,6 @@ def _ingest_instagram_posts_json(path: str, rag: RAGSystem) -> int:
     rag.add_document_descriptions(docs)
     print(f"[INGEST][IG] Added {before} docs (post-chunking may differ)", flush=True)
     return len(docs)
-
-
-def ingest_files(uploaded_files: List, rag: RAGSystem) -> Tuple[int, int, int]:
-    """
-    Lightweight ingestion dispatcher.
-    - Saves files into ./data/uploads/{photos,pdfs,csv,json}
-    - Images: extract metadata via PhotoProcessor and add document descriptions
-    - PDFs: process via PDFProcessor and add summary+raw documents
-    - CSVs: call embed_locations (if available)
-
-    Returns: (photos_added, pdfs_added, csvs_processed)
-    """
-    photos_added = 0
-    pdfs_added = 0
-    csvs_processed = 0
-
-    os.makedirs("./data/uploads/photos", exist_ok=True)
-    os.makedirs("./data/uploads/pdfs", exist_ok=True)
-    os.makedirs("./data/uploads/csv", exist_ok=True)
-    os.makedirs("./data/uploads/json", exist_ok=True)
-
-    # Prepare processors
-    photo_processor = PhotoProcessor(photos_dir="./data/uploads/photos")
-    pdf_processor = PDFProcessor(uploads_dir="./data/uploads/pdfs")
-
-    # Group by type
-    images = [f for f in uploaded_files if _is_image(getattr(f, "name", ""), getattr(f, "type", None))]
-    pdfs = [f for f in uploaded_files if _is_pdf(getattr(f, "name", ""), getattr(f, "type", None))]
-    csvs = [f for f in uploaded_files if _is_csv(getattr(f, "name", ""), getattr(f, "type", None))]
-    jsons = [f for f in uploaded_files if str(getattr(f, "name", "")).lower().endswith((".json", ".jsonl"))]
-
-    # Process images
-    if images:
-        new_descs = []
-        for img in images:
-            fname = img.name
-            save_path = os.path.join("./data/uploads/photos", fname)
-            # Save file
-            with open(save_path, "wb") as out:
-                out.write(img.getbuffer())
-            # Extract metadata
-            meta = photo_processor.extract_metadata(save_path)
-            if not meta:
-                continue
-            # Ensure only metadata is stored; do not persist original file path
-            try:
-                meta.pop("file_path", None)
-            except Exception:
-                pass
-            meta["type"] = meta.get("type") or "photo"
-            content = __import__("json").dumps(meta, ensure_ascii=False)
-            new_descs.append({"content": content, "metadata": meta})
-            # Delete the original file after processing to avoid storing heavy images on disk
-            try:
-                os.remove(save_path)
-            except Exception as _e:
-                print(f"[INGEST] Warning: could not delete image '{save_path}': {_e}")
-        if new_descs:
-            rag.add_document_descriptions(new_descs)
-            photos_added = len(new_descs)
-
-    # Process PDFs
-    for pdf in pdfs:
-        pdf_data = pdf_processor.process_pdf_file(pdf, pdf.name)
-        if not pdf_data:
-            continue
-        docs = pdf_processor.create_pdf_descriptions(pdf_data)
-        if docs:
-            rag.add_pdf_documents(docs)
-            pdfs_added += 1
-
-    # Process CSVs (locations or IMDb ratings)
-    for csv_file in csvs:
-        try:
-            save_path = os.path.join("./data/uploads/csv", csv_file.name)
-            with open(save_path, "wb") as out:
-                out.write(csv_file.getbuffer())
-            if _is_imdb_ratings_csv(save_path):
-                _ingest_imdb_ratings_csv(save_path, rag)
-                csvs_processed += 1
-        except Exception as e:
-            print(f"[INGEST] Error processing CSV '{csv_file.name}': {e}")
-
-    # Process JSONs (Instagram posts exports)
-    for js in jsons:
-        try:
-            save_path = os.path.join("./data/uploads/json", js.name)
-            with open(save_path, "wb") as out:
-                out.write(js.getbuffer())
-            # Route any JSON through the generic handler (auto-detects Instagram)
-            photos_added += _ingest_generic_json(save_path, rag)
-        except Exception as e:
-            print(f"[INGEST] Error processing JSON '{js.name}': {e}")
-
-    # Also scan existing uploads dir for any *.json/.jsonl to catch files added outside UI
-    try:
-        for fname in os.listdir("./data/uploads/json"):
-            if fname.lower().endswith(('.json', '.jsonl')):
-                fpath = os.path.join("./data/uploads/json", fname)
-                photos_added += _ingest_generic_json(fpath, rag)
-    except Exception as e:
-        print(f"[INGEST] Error scanning uploads for Instagram JSON: {e}")
-
-    return photos_added, pdfs_added, csvs_processed
 
 
 def _ingest_generic_json(path: str, rag: RAGSystem) -> int:
@@ -614,17 +526,19 @@ def _ingest_generic_json(path: str, rag: RAGSystem) -> int:
     return len(docs)
 
 
-def ingest_pdfs_in_uploads(rag: RAGSystem) -> int:
-    """Process all PDFs in ./data/uploads/pdfs and add to RAG. Returns number of PDFs added."""
-    uploads_dir = "./data/uploads/pdfs"
-    os.makedirs(uploads_dir, exist_ok=True)
-    pdf_processor = PDFProcessor(uploads_dir=uploads_dir)
+### Public ingestion entry points ###
+
+
+def ingest_pdfs_in_uploads(rag: RAGSystem, pdfs_dir: str = "./data/uploads/pdfs") -> int:
+    """Process all PDFs in a directory and add to RAG. Returns number of PDFs added."""
+    os.makedirs(pdfs_dir, exist_ok=True)
+    pdf_processor = PDFProcessor(uploads_dir=pdfs_dir)
     pdfs_added = 0
     try:
-        for fname in os.listdir(uploads_dir):
+        for fname in os.listdir(pdfs_dir):
             if not fname.lower().endswith('.pdf'):
                 continue
-            fpath = os.path.join(uploads_dir, fname)
+            fpath = os.path.join(pdfs_dir, fname)
             try:
                 with open(fpath, 'rb') as fh:
                     class _F:
@@ -648,21 +562,20 @@ def ingest_pdfs_in_uploads(rag: RAGSystem) -> int:
     return pdfs_added
 
 
-def ingest_csvs_in_uploads(rag: RAGSystem | None = None) -> int:
-    """Embed all CSVs in ./data/uploads/csv.
+def ingest_csvs_in_uploads(rag: RAGSystem | None = None, csv_dir: str = "./data/uploads/csv") -> int:
+    """Embed all CSVs in a directory.
     - Generic ingestion only: every CSV row becomes a document with all fields.
     Returns number of CSV files processed (files with >=1 parsed rows).
     """
-    uploads_dir = "./data/uploads/csv"
-    os.makedirs(uploads_dir, exist_ok=True)
+    os.makedirs(csv_dir, exist_ok=True)
     count = 0
     if rag is None:
         rag = RAGSystem()
     try:
-        for fname in os.listdir(uploads_dir):
+        for fname in os.listdir(csv_dir):
             if not fname.lower().endswith('.csv'):
                 continue
-            fpath = os.path.join(uploads_dir, fname)
+            fpath = os.path.join(csv_dir, fname)
             try:
                 rows = _ingest_generic_csv(fpath, rag)
                 if rows > 0:
@@ -689,18 +602,17 @@ def ingest_csvs_in_uploads(rag: RAGSystem | None = None) -> int:
     return count
 
 
-def ingest_instagram_jsons_in_uploads(rag: RAGSystem) -> int:
-    """Process any *.json/*.jsonl files in ./data/uploads/json. Auto-detect Instagram; otherwise ingest generic JSON.
-    Returns number of documents/posts ingested.
+def ingest_jsons_in_uploads(rag: RAGSystem, json_dir: str = "./data/uploads/json") -> int:
+    """Process any *.json/*.jsonl files in ./data/uploads/json using generic JSON ingestion.
+    Returns number of documents ingested.
     """
-    uploads_dir = "./data/uploads/json"
-    os.makedirs(uploads_dir, exist_ok=True)
+    os.makedirs(json_dir, exist_ok=True)
     posts_added = 0
     try:
-        for fname in os.listdir(uploads_dir):
+        for fname in os.listdir(json_dir):
             if not fname.lower().endswith(('.json', '.jsonl')):
                 continue
-            fpath = os.path.join(uploads_dir, fname)
+            fpath = os.path.join(json_dir, fname)
             try:
                 posts_added += _ingest_generic_json(fpath, rag)
             except Exception as e:
@@ -710,7 +622,7 @@ def ingest_instagram_jsons_in_uploads(rag: RAGSystem) -> int:
     return posts_added
 
 
-def ingest_photos_from_photos_dir(rag: RAGSystem, photos_dir: str = "./data/uploads/photos") -> int:
+def ingest_photos_in_uploads(rag: RAGSystem, photos_dir: str = "./data/uploads/photos") -> int:
     """Scan photos directory for images and embed new ones using RAGSystem.auto_sync_from_disk().
     Returns number of newly added photos (best-effort estimate based on filenames before/after).
     """
@@ -737,9 +649,13 @@ def ingest_photos_from_photos_dir(rag: RAGSystem, photos_dir: str = "./data/uplo
         return 0
 
 
+### aggregate ingestion ###
+
+
 def ingest_scan_uploads(rag: RAGSystem) -> Tuple[int, int, int]:
     """
-    Scan ./data/uploads subfolders for supported files and ingest them.
+    Scan ./data/uploads subfolders for supported files and ingest them. 
+    Useful for uploading files already in the uploads folder.
     - Instagram posts_*.json
     - PDFs (*.pdf)
     - CSVs (*.csv)
@@ -803,5 +719,110 @@ def ingest_scan_uploads(rag: RAGSystem) -> Tuple[int, int, int]:
                     print(f"[INGEST] Error embedding CSV '{fname}': {e}")
     except Exception as e:
         print(f"[INGEST] Error scanning uploads dir: {e}")
+
+    return photos_added, pdfs_added, csvs_processed
+
+
+def ingest_files(uploaded_files: List, rag: RAGSystem) -> Tuple[int, int, int]:
+    """
+    Lightweight ingestion dispatcher. 
+    Useful for uploading files from frontend sidepanel.
+    - Saves files into ./data/uploads/{photos,pdfs,csv,json}
+    - Images: extract metadata via PhotoProcessor and add document descriptions
+    - PDFs: process via PDFProcessor and add summary+raw documents
+    - CSVs: call embed_locations (if available)
+
+    Returns: (photos_added, pdfs_added, csvs_processed)
+    """
+    photos_added = 0
+    pdfs_added = 0
+    csvs_processed = 0
+
+    os.makedirs("./data/uploads/photos", exist_ok=True)
+    os.makedirs("./data/uploads/pdfs", exist_ok=True)
+    os.makedirs("./data/uploads/csv", exist_ok=True)
+    os.makedirs("./data/uploads/json", exist_ok=True)
+
+    # Prepare processors
+    photo_processor = PhotoProcessor(photos_dir="./data/uploads/photos")
+    pdf_processor = PDFProcessor(uploads_dir="./data/uploads/pdfs")
+
+    # Group by type
+    images = [f for f in uploaded_files if _is_image(getattr(f, "name", ""), getattr(f, "type", None))]
+    pdfs = [f for f in uploaded_files if _is_pdf(getattr(f, "name", ""), getattr(f, "type", None))]
+    csvs = [f for f in uploaded_files if _is_csv(getattr(f, "name", ""), getattr(f, "type", None))]
+    jsons = [f for f in uploaded_files if str(getattr(f, "name", "")).lower().endswith((".json", ".jsonl"))]
+
+    # Process images
+    if images:
+        new_descs = []
+        for img in images:
+            fname = img.name
+            save_path = os.path.join("./data/uploads/photos", fname)
+            # Save file
+            with open(save_path, "wb") as out:
+                out.write(img.getbuffer())
+            # Extract metadata
+            meta = photo_processor.extract_metadata(save_path)
+            if not meta:
+                continue
+            # Ensure only metadata is stored; do not persist original file path
+            try:
+                meta.pop("file_path", None)
+            except Exception:
+                pass
+            meta["type"] = meta.get("type") or "photo"
+            content = __import__("json").dumps(meta, ensure_ascii=False)
+            new_descs.append({"content": content, "metadata": meta})
+            # Delete the original file after processing to avoid storing heavy images on disk
+            try:
+                os.remove(save_path)
+            except Exception as _e:
+                print(f"[INGEST] Warning: could not delete image '{save_path}': {_e}")
+        if new_descs:
+            rag.add_document_descriptions(new_descs)
+            photos_added = len(new_descs)
+
+    # Process PDFs
+    for pdf in pdfs:
+        pdf_data = pdf_processor.process_pdf_file(pdf, pdf.name)
+        if not pdf_data:
+            continue
+        docs = pdf_processor.create_pdf_descriptions(pdf_data)
+        if docs:
+            rag.add_pdf_documents(docs)
+            pdfs_added += 1
+
+    # Process CSVs (locations or IMDb ratings)
+    for csv_file in csvs:
+        try:
+            save_path = os.path.join("./data/uploads/csv", csv_file.name)
+            with open(save_path, "wb") as out:
+                out.write(csv_file.getbuffer())
+            if _is_imdb_ratings_csv(save_path):
+                _ingest_imdb_ratings_csv(save_path, rag)
+                csvs_processed += 1
+        except Exception as e:
+            print(f"[INGEST] Error processing CSV '{csv_file.name}': {e}")
+
+    # Process JSONs (Instagram posts exports)
+    for js in jsons:
+        try:
+            save_path = os.path.join("./data/uploads/json", js.name)
+            with open(save_path, "wb") as out:
+                out.write(js.getbuffer())
+            # Route any JSON through the generic handler (auto-detects Instagram)
+            photos_added += _ingest_generic_json(save_path, rag)
+        except Exception as e:
+            print(f"[INGEST] Error processing JSON '{js.name}': {e}")
+
+    # Also scan existing uploads dir for any *.json/.jsonl to catch files added outside UI
+    try:
+        for fname in os.listdir("./data/uploads/json"):
+            if fname.lower().endswith(('.json', '.jsonl')):
+                fpath = os.path.join("./data/uploads/json", fname)
+                photos_added += _ingest_generic_json(fpath, rag)
+    except Exception as e:
+        print(f"[INGEST] Error scanning uploads for Instagram JSON: {e}")
 
     return photos_added, pdfs_added, csvs_processed

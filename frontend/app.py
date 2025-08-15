@@ -14,8 +14,8 @@ from backend.ingestion import (
     ingest_scan_uploads,
     ingest_pdfs_in_uploads,
     ingest_csvs_in_uploads,
-    ingest_instagram_jsons_in_uploads,
-    ingest_photos_from_photos_dir,
+    ingest_jsons_in_uploads,
+    ingest_photos_in_uploads,
 )
 import random
 import html as html_lib
@@ -664,7 +664,7 @@ def main():
                 if st.button("📸 Embed Photos"):
                     with st.spinner("Embedding photos from ./data/uploads/photos …"):
                         try:
-                            count = ingest_photos_from_photos_dir(st.session_state.chatbot.rag_system, photos_dir="./data/uploads/photos")
+                            count = ingest_photos_in_uploads(st.session_state.chatbot.rag_system, photos_dir="./data/uploads/photos")
                             if count:
                                 st.success(f"✅ Embedded {count} new photos")
                             else:
@@ -697,9 +697,9 @@ def main():
                             st.error(f"❌ Error embedding PDFs: {e}")
             with col_d:
                 if st.button("🧾 Embed JSONs"):
-                    with st.spinner("Embedding Instagram posts_*.json from ./data/uploads/json …"):
+                    with st.spinner("Embedding JSONs from ./data/uploads/json …"):
                         try:
-                            count = ingest_instagram_jsons_in_uploads(st.session_state.chatbot.rag_system)
+                            count = ingest_jsons_in_uploads(st.session_state.chatbot.rag_system)
                             if count:
                                 st.success(f"✅ Embedded {count} post(s)")
                             else:
@@ -890,7 +890,7 @@ def main():
                 #             try:
                 #                 rag = st.session_state.chatbot.rag_system
                 #                 deleted = rag.delete_by_filter({"platform": "instagram"})
-                #                 added = ingest_instagram_jsons_in_uploads(rag)
+                #                 added = ingest_jsons_in_uploads(rag)
                 #                 # After ingest, resolve locations from coordinates
                 #                 fixed = rag.fix_existing_instagram_locations()
                 #                 st.success(f"✅ Deleted {deleted}, added {added} and resolved {fixed} Instagram post(s)")
