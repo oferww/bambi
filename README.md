@@ -4,25 +4,37 @@
 
 <p align="center">
   A personal AI assistant that knows about Ofer’s life. <br>
-  It uses RAG (Retrieval Augmented Generation) over photos, PDFs, and Instagram/CSV data, to answer questions, with a Streamlit frontend and a Cohere-powered backend.
+  It uses RAG (Retrieval Augmented Generation) over my data, to answer questions, with a Streamlit frontend and a Cohere-powered backend.
 </p>
+
+I designed and built this project end‑to‑end, wearing multiple hats across the stack:
+
+- **Product management**: Defined scope, north-star use cases, and MVP; prioritized RAG-first answers and streaming UX.
+- **UX/UI design**: Designed a single-page chat layout, message streaming, and context debug views.
+- **Frontend engineering**: Implemented Streamlit UI, session state, and streaming rendering.
+- **Backend engineering**: Built the chat orchestration layer (intent routing, conversational memory, LLM integration) and exposed cohesive chat/KB APIs.
+- **Data engineering**: Standardized document schemas/metadata, chunking configs, and ingestion paths.
+- **Machine learning / LLM & prompt engineering**: Authored system prompts, tuned temps/lengths, added intent classification and safe fallbacks/timeouts.
+- **Retrieval/RAG engineering**: Implemented retrieval over a vector store, optional neural reranking, and strict context/token budgets.
+- **DevOps & infrastructure**: Dockerfile + `docker-compose.yml`, environment config via `.env`, reproducible local setup.
+- **MLOps & observability**: Added structured logs for RAG docs, intents, and Cohere requests.
+- **QA/testing & CI**: Smoke-tested flows locally, added error handling, timeouts, and graceful fallbacks to avoid UI stalls.
 
 ## Features
 - __RAG over personal data__: Vector search via ChromaDB with Cohere embeddings.
 - __Chat with memory__: Conversation summary memory using LangChain and Cohere (`backend/chatbot.py`).
-- __PDF ingestion & summarization__: Extract, summarize, and embed PDFs (`backend/utils/pdf_processor.py`).
 - __Photo metadata ingestion__: Extract EXIF/location metadata for photos (`backend/utils/photo_processor.py`).
 - __S3 sync (optional)__: Pull embeddings from S3 on-demand from the UI or at startup.
 - __Streamlit UI__: Modern single-page chat interface (`frontend/app.py`).
 - __Docker support__: Reproducible container build and `docker-compose` for local run.
-
+- __PDF ingestion & summarization__: Currently not supported (planned). Existing utilities like `backend/utils/pdf_processor.py` are not wired in the UI.
 
 ## Architecture
 - __Frontend__: Streamlit app in `frontend/app.py` (port 8501 by default).
 - __Backend / Core__:
   - `backend/chatbot.py`: `OferGPT` chat flow, intent detection, Cohere generation, RAG context assembly.
   - `backend/rag_system.py`: ChromaDB vector store, Cohere embeddings, chunking, dedupe, CSV dumps.
-  - `backend/utils/pdf_processor.py`: PDF text extraction (PyPDF2/pdfplumber/pdfminer) and hierarchical summarization via Cohere.
+  - `backend/utils/pdf_processor.py`: Provided for future use; PDF ingestion is currently not supported.
   - Additional utils for photos, S3 sync, ingestion helpers under `backend/utils/` and `backend/`.
 - __Data__: Embeddings and uploads in `data/` (created at runtime).
 
@@ -138,8 +150,8 @@ docker run --rm -p 8501:8501 --env-file .env -v %cd%/data:/app/data bambi:latest
 
 ## Data ingestion
 - __Photos__: Place image files under `data/uploads/photos/`. On startup or via utilities, new photos are embedded and their original files may be deleted after processing (see `RAGSystem.auto_sync_photos_from_disk`).
-- __PDFs__: Place files under `data/uploads/pdfs/`. The processor extracts text, summarizes with Cohere, and embeds both summary and (optionally) raw content.
-- __CSV/JSON__: Ingestion helpers exist under `backend/ingestion.py` and `backend/utils/` (if present) to process Instagram/CSV sources.
+- __PDFs__: Not supported in the current build.
+- __Instagram / CSV__: Instagram ingestion is not supported in the current build. CSV helpers may exist but are not wired into the UI.
 - __Manual ingestion__: Programmatically call `RAGSystem.add_document_descriptions()` and friends to add custom content.
 
 The Chroma store is persisted in `data/embeddings/`. A CSV snapshot `data/embeddings_dump.csv` is also produced for inspection.

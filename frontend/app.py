@@ -509,7 +509,7 @@ def main():
             
             # Knowledge base info
             st.markdown("#### 📊 Knowledge Base Info")
-            info = st.session_state.chatbot.get_knowledge_base_info()
+            info = st.session_state.chatbot.get_collection_info()
             if "error" not in info:
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric("Total Docs", info.get("total_docs", 0))

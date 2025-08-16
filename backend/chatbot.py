@@ -50,67 +50,8 @@ class OferGPT:
         # Intent categories the LLM may return when classifying user input
         self._intent_labels = {"greeting", "chitchat", "nonsense", "question", "ofer_question"}
 
-    def _maybe_rerank(self, query: str, retrieved: list[dict]) -> list[dict]:
-        """Optionally re-rank retrieved docs using Cohere Rerank.
+    ### Utils ###
 
-        Env flags:
-        - OFERGPT_RERANK: '1' => enable (default '0')
-        - OFERGPT_RERANK_TOP_K: how many items from retrieved to re-rank (default from OFERGPT_RAG_TOP_K or 20)
-        - OFERGPT_RERANK_MODEL: model name (default 'rerank-english-v3.0')
-
-        Always falls back to the original list on any failure.
-        """
-        try:
-            if os.getenv("OFERGPT_RERANK", "0") != "1":
-                return retrieved
-            if not retrieved:
-                return retrieved
-            try:
-                rr_top_k = int(os.getenv("OFERGPT_RERANK_TOP_K", os.getenv("OFERGPT_RAG_TOP_K", "20")))
-            except Exception:
-                rr_top_k = 20
-
-            head = retrieved[:rr_top_k]
-            candidates = [d.get("content", "") or "" for d in head]
-            # If all candidates are empty, nothing to do
-            if not any(candidates):
-                return retrieved
-
-            rerank_model = os.getenv("OFERGPT_RERANK_MODEL", "rerank-english-v3.0")
-            try:
-                rr = self.cohere_client.rerank(
-                    model=rerank_model,
-                    query=query,
-                    documents=candidates,
-                    top_n=len(candidates),
-                )
-            except Exception:
-                return retrieved
-
-            results = getattr(rr, "results", None) or []
-            if not results:
-                return retrieved
-
-            # Sort by relevance_score desc
-            try:
-                ordered = sorted(
-                    [(r.index, getattr(r, "relevance_score", 0.0)) for r in results],
-                    key=lambda x: x[1],
-                    reverse=True,
-                )
-            except Exception:
-                return retrieved
-
-            # Reassemble: re-ordered head + untouched tail
-            try:
-                reordered_head = [head[idx] for idx, _ in ordered if 0 <= idx < len(head)]
-                tail = retrieved[len(head):]
-                return reordered_head + tail
-            except Exception:
-                return retrieved
-        except Exception:
-            return retrieved
-    
     def _truncate(self, text: str, limit: int) -> str:
         """Truncate text to at most 'limit' characters, appending a notice if truncated."""
         try:
@@ -125,6 +66,128 @@ class OferGPT:
         suffix = " … [TRUNCATED]"
         keep = max(0, limit - len(suffix))
         return text[:keep] + suffix
+
+    ### Core chat API ###
+
+    def chat(self, user_input: str) -> str:
+        """Main chat method that combines intent routing, memory, and RAG."""
+        # Normalize input
+        user_input = user_input.strip()
+        # Pull memory first for intent detection context
+        memory_context = self.memory.buffer
+        # LLM-based intent detection to optionally skip RAG
+        intent = self._detect_intent_llm(user_input, memory_context)
+        if intent in {"greeting", "chitchat", "nonsense"}:
+            # Smalltalk path: no RAG, call generator with empty context
+            response = self.generate_response_with_memory(user_input, "", memory_context)
+        else:
+            # Information-seeking: run RAG
+            context = self.get_relevant_context(user_input)
+            response = self.generate_response_with_memory(user_input, context, memory_context)
+
+        # Update both memory systems
+        self.memory.chat_memory.add_user_message(user_input)
+        self.memory.chat_memory.add_ai_message(response)
+        
+        # Keep backward compatibility with conversation_history
+        self.conversation_history.append({"role": "user", "content": user_input})
+        self.conversation_history.append({"role": "assistant", "content": response})
+        
+        return response
+    
+    def chat_stream(self, user_input: str):
+        """Main streaming chat method with LLM-based intent routing to skip RAG for greetings/smalltalk."""
+        user_input = user_input.strip()
+        memory_context = self.memory.buffer
+        intent = self._detect_intent_llm(user_input, memory_context)
+        full_response = ""
+        if intent in {"greeting", "chitchat", "nonsense"}:
+            # Smalltalk path: no RAG, stream with empty context
+            for token in self.stream_response_with_memory(user_input, "", memory_context):
+                full_response += token
+                yield token
+        else:
+            # Information-seeking: run RAG
+            context = self.get_relevant_context(user_input)
+            for token in self.stream_response_with_memory(user_input, context, memory_context):
+                full_response += token
+                yield token
+        
+        # Update both memory systems with the complete response
+        self.memory.chat_memory.add_user_message(user_input)
+        self.memory.chat_memory.add_ai_message(full_response)
+        
+        # Keep backward compatibility with conversation_history
+        self.conversation_history.append({"role": "user", "content": user_input})
+        self.conversation_history.append({"role": "assistant", "content": full_response})
+
+    ### Intent detection ###
+
+    def _detect_intent_llm(self, query: str, memory_context: str) -> str:
+        """Use the LLM to classify high-level intent.
+
+        Returns one of: greeting, chitchat, nonsense, question, ofer_question.
+        Falls back to 'question' on any failure.
+        """
+        try:
+            instruction = (
+                "Classify the user's message into exactly one of these intents: "
+                "greeting, chitchat, nonsense, question, ofer_question. "
+                "Definitions: greeting = hello/hi/etc; chitchat = casual small talk; "
+                "nonsense = empty or meaningless; ofer_question = specifically about Ofer; "
+                "question = general question; ofer_question = specifically about Ofer. "
+                "Respond ONLY with the intent word, no punctuation, no explanation."
+            )
+            mem_text = memory_context or ""
+            prompt = (
+                f"Instruction: {instruction}\n\n"
+                f"Conversation summary (may be empty):\n{mem_text}\n\n"
+                f"User message:\n{query}\n\n"
+                "Intent:"
+            )
+            try:
+                timeout_s = int(os.getenv("OFERGPT_INTENT_TIMEOUT_SEC", "5"))
+            except Exception:
+                timeout_s = 5
+            # Safe logging without preview variable
+            try:
+                _prompt_len = len(prompt)
+            except Exception:
+                _prompt_len = -1
+            print(
+                f"[INTENT][REQUEST] timeout={timeout_s}s prompt_len={_prompt_len} max_tokens=8",
+                flush=True,
+            )
+            # Use Cohere Chat API (Generate is deprecated)
+            chat_kwargs = {
+                "message": prompt,
+                "temperature": 0.0,
+                "max_tokens": 8,
+            }
+            _chat_model = os.getenv("COHERE_CHAT_MODEL")
+            if _chat_model:
+                chat_kwargs["model"] = _chat_model
+
+            if timeout_s and timeout_s > 0:
+                with cf.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(self.cohere_client.chat, **chat_kwargs)
+                    resp = fut.result(timeout=timeout_s)
+            else:
+                resp = self.cohere_client.chat(**chat_kwargs)
+
+            raw_intent = (getattr(resp, "text", None) or "").strip()
+            print(f"[INTENT][RAW_RESPONSE] {raw_intent!r}", flush=True)
+            intent = raw_intent.lower()
+            if intent in self._intent_labels:
+                print(f"[INTENT][DECISION] intent={intent} (matched known labels)", flush=True)
+                return intent
+            print(f"[INTENT][DECISION] intent_unrecognized={intent!r} -> fallback='question'", flush=True)
+            return "question"
+        except Exception as e:
+            print(f"[INTENT] fallback due to error: {e}", flush=True)
+            return "question"
+
+    ### RAG related methods ###
 
     def _compute_relevant_context(self, query: str) -> str:
         """Compute the RAG context for a query (no timeout)."""
@@ -148,7 +211,7 @@ class OferGPT:
             per_doc_cap = 900
         retrieved = self.rag_system.search_similar(query, k=top_k)
         # Optional neural re-ranking (Cohere Rerank) to improve ordering
-        retrieved = self._maybe_rerank(query, retrieved)
+        retrieved = self.apply_rerank(query, retrieved)
         # Verbose logging of all RAG documents found (pre-cap)
         try:
             print(f"[RAG] Retrieved {len(retrieved)} documents:", flush=True)
@@ -271,6 +334,69 @@ class OferGPT:
         # No timeout specified; compute directly
         return self._compute_relevant_context(query)
     
+    def apply_rerank(self, query: str, retrieved: list[dict]) -> list[dict]:
+        """Apply rerank to retrieved docs using Cohere Rerank.
+
+        Env flags:
+        - OFERGPT_RERANK: '1' => enable (default '0')
+        - OFERGPT_RERANK_TOP_K: how many items from retrieved to re-rank (default from OFERGPT_RAG_TOP_K or 20)
+        - OFERGPT_RERANK_MODEL: model name (default 'rerank-english-v3.0')
+
+        Always falls back to the original list on any failure.
+        """
+        try:
+            if os.getenv("OFERGPT_RERANK", "0") != "1":
+                return retrieved
+            if not retrieved:
+                return retrieved
+            try:
+                rr_top_k = int(os.getenv("OFERGPT_RERANK_TOP_K", os.getenv("OFERGPT_RAG_TOP_K", "20")))
+            except Exception:
+                rr_top_k = 20
+
+            head = retrieved[:rr_top_k]
+            candidates = [d.get("content", "") or "" for d in head]
+            # If all candidates are empty, nothing to do
+            if not any(candidates):
+                return retrieved
+
+            rerank_model = os.getenv("OFERGPT_RERANK_MODEL", "rerank-english-v3.0")
+            try:
+                rr = self.cohere_client.rerank(
+                    model=rerank_model,
+                    query=query,
+                    documents=candidates,
+                    top_n=len(candidates),
+                )
+            except Exception:
+                return retrieved
+
+            results = getattr(rr, "results", None) or []
+            if not results:
+                return retrieved
+
+            # Sort by relevance_score desc
+            try:
+                ordered = sorted(
+                    [(r.index, getattr(r, "relevance_score", 0.0)) for r in results],
+                    key=lambda x: x[1],
+                    reverse=True,
+                )
+            except Exception:
+                return retrieved
+
+            # Reassemble: re-ordered head + untouched tail
+            try:
+                reordered_head = [head[idx] for idx, _ in ordered if 0 <= idx < len(head)]
+                tail = retrieved[len(head):]
+                return reordered_head + tail
+            except Exception:
+                return retrieved
+        except Exception:
+            return retrieved
+
+    ### Generation (LLM output) ###
+
     def generate_response_with_memory(self, query: str, context: str, memory_context: str) -> str:
         """Generate response using Cohere with RAG context and conversation memory."""
         try:
@@ -343,70 +469,6 @@ class OferGPT:
         except Exception as e:
             print(f"Error generating response with memory: {e}")
             return "I'm sorry, I'm having trouble generating a response right now. Please try again."
-    
-    def _detect_intent_llm(self, query: str, memory_context: str) -> str:
-        """Use the LLM to classify high-level intent.
-
-        Returns one of: greeting, chitchat, nonsense, question, ofer_question.
-        Falls back to 'question' on any failure.
-        """
-        try:
-            instruction = (
-                "Classify the user's message into exactly one of these intents: "
-                "greeting, chitchat, nonsense, question, ofer_question. "
-                "Definitions: greeting = hello/hi/etc; chitchat = casual small talk; "
-                "nonsense = empty or meaningless; ofer_question = specifically about Ofer; "
-                "question = general question; ofer_question = specifically about Ofer. "
-                "Respond ONLY with the intent word, no punctuation, no explanation."
-            )
-            mem_text = memory_context or ""
-            prompt = (
-                f"Instruction: {instruction}\n\n"
-                f"Conversation summary (may be empty):\n{mem_text}\n\n"
-                f"User message:\n{query}\n\n"
-                "Intent:"
-            )
-            try:
-                timeout_s = int(os.getenv("OFERGPT_INTENT_TIMEOUT_SEC", "5"))
-            except Exception:
-                timeout_s = 5
-            # Safe logging without preview variable
-            try:
-                _prompt_len = len(prompt)
-            except Exception:
-                _prompt_len = -1
-            print(
-                f"[INTENT][REQUEST] timeout={timeout_s}s prompt_len={_prompt_len} max_tokens=8",
-                flush=True,
-            )
-            # Use Cohere Chat API (Generate is deprecated)
-            chat_kwargs = {
-                "message": prompt,
-                "temperature": 0.0,
-                "max_tokens": 8,
-            }
-            _chat_model = os.getenv("COHERE_CHAT_MODEL")
-            if _chat_model:
-                chat_kwargs["model"] = _chat_model
-
-            if timeout_s and timeout_s > 0:
-                with cf.ThreadPoolExecutor(max_workers=1) as ex:
-                    fut = ex.submit(self.cohere_client.chat, **chat_kwargs)
-                    resp = fut.result(timeout=timeout_s)
-            else:
-                resp = self.cohere_client.chat(**chat_kwargs)
-
-            raw_intent = (getattr(resp, "text", None) or "").strip()
-            print(f"[INTENT][RAW_RESPONSE] {raw_intent!r}", flush=True)
-            intent = raw_intent.lower()
-            if intent in self._intent_labels:
-                print(f"[INTENT][DECISION] intent={intent} (matched known labels)", flush=True)
-                return intent
-            print(f"[INTENT][DECISION] intent_unrecognized={intent!r} -> fallback='question'", flush=True)
-            return "question"
-        except Exception as e:
-            print(f"[INTENT] fallback due to error: {e}", flush=True)
-            return "question"
 
     def stream_response_with_memory(self, query: str, context: str, memory_context: str):
         """Generate streaming response using Cohere with RAG context and conversation memory."""
@@ -508,59 +570,20 @@ class OferGPT:
         except Exception as e:
             print(f"Error generating streaming response: {e}", flush=True)
             yield "I'm sorry, I'm having trouble generating a response right now. Please try again."
-    
-    def chat(self, user_input: str) -> str:
-        """Main chat method that combines intent routing, memory, and RAG."""
-        # Normalize input
-        user_input = user_input.strip()
-        # Pull memory first for intent detection context
-        memory_context = self.memory.buffer
-        # LLM-based intent detection to optionally skip RAG
-        intent = self._detect_intent_llm(user_input, memory_context)
-        if intent in {"greeting", "chitchat", "nonsense"}:
-            # Smalltalk path: no RAG, call generator with empty context
-            response = self.generate_response_with_memory(user_input, "", memory_context)
-        else:
-            # Information-seeking: run RAG
-            context = self.get_relevant_context(user_input)
-            response = self.generate_response_with_memory(user_input, context, memory_context)
+        
+    ### Memory management ###
 
-        # Update both memory systems
-        self.memory.chat_memory.add_user_message(user_input)
-        self.memory.chat_memory.add_ai_message(response)
-        
-        # Keep backward compatibility with conversation_history
-        self.conversation_history.append({"role": "user", "content": user_input})
-        self.conversation_history.append({"role": "assistant", "content": response})
-        
-        return response
-    
-    def chat_stream(self, user_input: str):
-        """Main streaming chat method with LLM-based intent routing to skip RAG for greetings/smalltalk."""
-        user_input = user_input.strip()
-        memory_context = self.memory.buffer
-        intent = self._detect_intent_llm(user_input, memory_context)
-        full_response = ""
-        if intent in {"greeting", "chitchat", "nonsense"}:
-            # Smalltalk path: no RAG, stream with empty context
-            for token in self.stream_response_with_memory(user_input, "", memory_context):
-                full_response += token
-                yield token
-        else:
-            # Information-seeking: run RAG
-            context = self.get_relevant_context(user_input)
-            for token in self.stream_response_with_memory(user_input, context, memory_context):
-                full_response += token
-                yield token
-        
-        # Update both memory systems with the complete response
-        self.memory.chat_memory.add_user_message(user_input)
-        self.memory.chat_memory.add_ai_message(full_response)
-        
-        # Keep backward compatibility with conversation_history
-        self.conversation_history.append({"role": "user", "content": user_input})
-        self.conversation_history.append({"role": "assistant", "content": full_response})
-    
+    def clear_conversation_memory(self):
+        """Clear only the conversation memory, keep knowledge base."""
+        self.memory.clear()
+        self.conversation_history = []
+
+    ### Knowledge base management ###
+
+    def get_collection_info(self) -> Dict[str, Any]:
+        """Get information about the knowledge base (mirrors RAGSystem.get_collection_info)."""
+        return self.rag_system.get_collection_info()
+
     def add_photos_to_knowledge_base(self, photos_dir: str = "./data/uploads/photos"):
         """Add photos from directory to the knowledge base."""
         from .utils.photo_processor import PhotoProcessor
@@ -573,6 +596,14 @@ class OferGPT:
         
         return len(photos_metadata)
     
+    def clear_knowledge_base(self):
+        """Clear all data from the knowledge base."""
+        self.rag_system.clear_vector_store()
+        self.conversation_history = []
+        self.memory.clear()  # Clear conversation memory too
+
+    ### not used ###
+
     def add_pdf_to_knowledge_base(self, pdf_file, filename: str) -> bool:
         """Add a PDF document to the knowledge base."""
         try:
@@ -645,18 +676,4 @@ class OferGPT:
         except Exception as e:
             print(f"❌ Error adding uploaded photos to knowledge base: {e}", flush=True)
             return 0
-    
-    def get_knowledge_base_info(self) -> Dict[str, Any]:
-        """Get information about the knowledge base."""
-        return self.rag_system.get_collection_info()
-    
-    def clear_knowledge_base(self):
-        """Clear all data from the knowledge base."""
-        self.rag_system.clear_vector_store()
-        self.conversation_history = []
-        self.memory.clear()  # Clear conversation memory too
-    
-    def clear_conversation_memory(self):
-        """Clear only the conversation memory, keep knowledge base."""
-        self.memory.clear()
-        self.conversation_history = []
+            
