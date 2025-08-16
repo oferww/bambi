@@ -259,49 +259,52 @@ class RAGSystem:
         except Exception as e:
             print(f"⚠️  Could not dump embeddings CSV: {e}")
 
+    @staticmethod
     def _doc_key(doc: Document) -> str:
-                meta = doc.metadata or {}
-                key = (
-                    meta.get("idempotency_key")
-                    or meta.get("filename")
-                    or hashlib.md5(
-                        (doc.page_content[:200] + json.dumps(meta, sort_keys=True, ensure_ascii=False)).encode("utf-8")
-                    ).hexdigest()
-                )
-                return key
+        meta = doc.metadata or {}
+        key = (
+            meta.get("idempotency_key")
+            or meta.get("filename")
+            or hashlib.md5(
+                (doc.page_content[:200] + json.dumps(meta, sort_keys=True, ensure_ascii=False)).encode("utf-8")
+            ).hexdigest()
+        )
+        return key
 
+    @staticmethod
     def _extract_single_query(text: str, original: str) -> str:
-                            # Helper to sanitize and extract a single corrected query
-                            t = text.strip()                            # Remove common prefixes/labels
-                            for prefix in [
-                                "Corrected query:",
-                                "Correction:",
-                                "Corrected:",
-                                "Query:",
-                            ]:
-                                if t.lower().startswith(prefix.lower()):
-                                    t = t[len(prefix):].strip()
-                            # Strip wrapping quotes/backticks/brackets
-                            t = t.strip().strip("`")
-                            if t.startswith("[") and t.endswith("]"):
-                                inner = t[1:-1]
-                                parts = [p.strip().strip("'\"") for p in inner.split(",") if p.strip()]
-                                candidates = parts if parts else [t]
-                            else:
-                                lines = [ln.strip().strip("-• ").strip("'\"") for ln in t.splitlines() if ln.strip()]
-                                candidates = lines if len(lines) > 1 else [t]
+        # Helper to sanitize and extract a single corrected query
+        t = text.strip()
+        # Remove common prefixes/labels
+        for prefix in [
+            "Corrected query:",
+            "Correction:",
+            "Corrected:",
+            "Query:",
+        ]:
+            if t.lower().startswith(prefix.lower()):
+                t = t[len(prefix):].strip()
+        # Strip wrapping quotes/backticks/brackets
+        t = t.strip().strip("`")
+        if t.startswith("[") and t.endswith("]"):
+            inner = t[1:-1]
+            parts = [p.strip().strip("'\"") for p in inner.split(",") if p.strip()]
+            candidates = parts if parts else [t]
+        else:
+            lines = [ln.strip().strip("-• ").strip("'\"") for ln in t.splitlines() if ln.strip()]
+            candidates = lines if len(lines) > 1 else [t]
 
-                            # Choose candidate with highest token overlap to original
-                            orig_tokens = set(original.lower().split())
-                            best = None
-                            best_score = -1
-                            for cand in candidates:
-                                tokens = set(cand.lower().split())
-                                score = len(tokens & orig_tokens)
-                                if best is None or score > best_score:
-                                    best = cand
-                                    best_score = score
-                            return (best or original).strip("'\"")
+        # Choose candidate with highest token overlap to original
+        orig_tokens = set(original.lower().split())
+        best = None
+        best_score = -1
+        for cand in candidates:
+            tokens = set(cand.lower().split())
+            score = len(tokens & orig_tokens)
+            if best is None or score > best_score:
+                best = cand
+                best_score = score
+        return (best or original).strip("'\"")
 
     def _is_proper_like(tok: str) -> bool:
         # Guard against introducing new proper-name tokens not present in original
@@ -549,19 +552,34 @@ class RAGSystem:
             # 2) Build query list: corrected first (preferred), then original if different
             queries = [corrected] if corrected == original else [corrected, original]
             print(f"[RAG] Using queries: {queries}")
-            # Determine overfetch amount based on collection size: fetch all, then trim later
+            # Determine overfetch amount with a safe cap to avoid HNSW contiguous array issues
             try:
                 collection = self.chroma_client.get_or_create_collection("ofergpt_memories")
-                fetch_k = int(collection.count())
+                count = int(collection.count())
             except Exception:
-                # Fallback to env/default if collection lookup fails
-                try:
-                    fetch_k = int(os.getenv("OFERGPT_RAG_FETCH_K", "500"))
-                except Exception:
-                    fetch_k = 500
-            # Ensure we fetch at least k items
+                count = None
+            # Read caps from env with sensible defaults
+            try:
+                default_fetch = int(os.getenv("OFERGPT_RAG_FETCH_K", "500"))
+            except Exception:
+                default_fetch = 500
+            try:
+                max_fetch_cap = int(os.getenv("OFERGPT_RAG_MAX_FETCH", "1000"))
+            except Exception:
+                max_fetch_cap = 1000
+            # Start from count or default, then cap and ensure at least k
+            base = count if isinstance(count, int) and count >= 0 else default_fetch
+            fetch_k = min(base, max_fetch_cap)
             try:
                 fetch_k = max(fetch_k, int(k))
+            except Exception:
+                pass
+            # Log effective k for this prompt
+            try:
+                print(
+                    f"[RAG] Effective fetch_k={fetch_k} (requested k={k}, collection_count={count}, max_cap={max_fetch_cap})",
+                    flush=True,
+                )
             except Exception:
                 pass
             # 3) Perform searches and merge results with preference for corrected pass
@@ -574,10 +592,23 @@ class RAGSystem:
                     results = self.vectorstore.similarity_search_with_score(q, k=fetch_k)
                 except Exception as inner_e:
                     print(f"[RAG] Search failed for query variant {idx}: {inner_e}")
-                    continue
+                    # Retry once with a smaller k if possible
+                    try:
+                        smaller_k = max(int(k), min(200, fetch_k // 2))
+                    except Exception:
+                        smaller_k = int(k) if isinstance(k, int) else 5
+                    if smaller_k < fetch_k:
+                        try:
+                            print(f"[RAG] Retrying search with smaller k={smaller_k}")
+                            results = self.vectorstore.similarity_search_with_score(q, k=smaller_k)
+                        except Exception as inner_e2:
+                            print(f"[RAG] Retry failed for query variant {idx}: {inner_e2}")
+                            continue
+                    else:
+                        continue
 
                 for doc, score in results:
-                    key = _doc_key(doc)
+                    key = self._doc_key(doc)
                     # Chroma returns a distance. Convert to cosine similarity where higher is better.
                     try:
                         distance = float(score)
