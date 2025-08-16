@@ -8,7 +8,6 @@ services:
     volumes:
       - ./:/app              # Bind-mount full source for live code reloads
       - ./data:/app/data
-      - ./keys:/keys
       - ./.env:/app/.env
     environment:
       - COHERE_API_KEY_EMBED=${COHERE_API_KEY_EMBED}

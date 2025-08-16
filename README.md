@@ -7,17 +7,17 @@
   It uses RAG (Retrieval Augmented Generation) over my data, to answer questions, with a Streamlit frontend and a Cohere-powered backend.
 </p>
 
-I designed and built this project end‑to‑end, wearing multiple hats across the stack:
+I designed and built this project end‑to‑end, wearing multiple hats 🎩 across the stack:
 
-- **Product management**: Defined scope, north-star use cases, and MVP; prioritized RAG-first answers and streaming UX.
-- **UX/UI design**: Designed a single-page chat layout, message streaming, and context debug views.
-- **Frontend engineering**: Implemented Streamlit UI, session state, and streaming rendering.
 - **Backend engineering**: Built the chat orchestration layer (intent routing, conversational memory, LLM integration) and exposed cohesive chat/KB APIs.
 - **Data engineering**: Standardized document schemas/metadata, chunking configs, and ingestion paths.
 - **Machine learning / LLM & prompt engineering**: Authored system prompts, tuned temps/lengths, added intent classification and safe fallbacks/timeouts.
 - **Retrieval/RAG engineering**: Implemented retrieval over a vector store, optional neural reranking, and strict context/token budgets.
 - **DevOps & infrastructure**: Dockerfile + `docker-compose.yml`, environment config via `.env`, reproducible local setup.
 - **MLOps & observability**: Added structured logs for RAG docs, intents, and Cohere requests.
+- **Frontend engineering**: Implemented Streamlit UI, session state, and streaming rendering.
+- **Product management**: Defined scope, north-star use cases, and MVP; prioritized RAG-first answers and streaming UX.
+- **UX/UI design**: Designed a single-page chat layout, message streaming, and context debug views.
 - **QA/testing & CI**: Smoke-tested flows locally, added error handling, timeouts, and graceful fallbacks to avoid UI stalls.
 
 ## Features
@@ -138,7 +138,7 @@ Build and run via Docker Compose (recommended):
 docker compose up --build
 ```
 - Binds port `8501:8501`.
-- Mounts project, `data/`, `.env`, and `keys/` into the container.
+- Mounts project, `data/`, `.env`, into the container.
 - Honors environment knobs in `docker-compose.yml` (PDF summary tuning, UI flags, etc.).
 
 Or build the image directly:
