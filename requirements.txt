@@ -18,3 +18,7 @@ geopy==2.4.0
 exifread==3.0.0
 PyPDF2==3.0.1
 python-dotenv
+
+# Session persistence and cookies
+upstash-redis>=1.0.0
+streamlit-cookies-manager>=0.2.0

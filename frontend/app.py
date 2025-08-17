@@ -19,6 +19,10 @@ from backend.ingestion import (
 )
 import random
 import html as html_lib
+import uuid
+from streamlit_cookies_manager import CookieManager
+from backend.persistence import get_persistence
+from backend.session_store import SessionStore
 # Load environment variables
 load_dotenv()
 
@@ -39,6 +43,29 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state=("collapsed" if HIDE_SIDEBAR else "expanded"),
 )
+
+# Cookie manager (for persistent user session id)
+cookie_manager = CookieManager(prefix="bambi_")
+
+def _get_or_create_session_id() -> str:
+    # Ensure cookies are ready for use in this run context
+    if not cookie_manager.ready():
+        st.stop()
+    sid = cookie_manager.get("session_id")
+    if not sid:
+        sid = str(uuid.uuid4())
+        cookie_manager["session_id"] = sid
+        cookie_manager.save()
+    return sid
+
+@st.cache_resource
+def get_session_store():
+    try:
+        return SessionStore()
+    except Exception as e:
+        # Upstash not configured; run without persistence
+        st.warning(f"Session store disabled: {e}")
+        return None
 
 # Rotating chat input placeholders
 PLACEHOLDERS = [
@@ -91,6 +118,10 @@ THINKING_PHRASES = {
 
 if "current_placeholder" not in st.session_state:
     st.session_state.current_placeholder = random.choice(PLACEHOLDERS)
+if "session_id" not in st.session_state:
+    st.session_state.session_id = _get_or_create_session_id()
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = None
 
 def _next_placeholder():
     """Pick a different placeholder for the next prompt."""
@@ -438,6 +469,10 @@ if 'knowledge_base_initialized' not in st.session_state:
     st.session_state.knowledge_base_initialized = False
 if 'pending_response' not in st.session_state:
     st.session_state.pending_response = False
+if 'session_id' not in st.session_state:
+    st.session_state.session_id = _get_or_create_session_id()
+if 'thread_id' not in st.session_state:
+    st.session_state.thread_id = None
 
 
 def initialize_chatbot():
@@ -490,11 +525,104 @@ def main():
         with st.spinner("🚀 Initializing bambi..."):
             chatbot = initialize_chatbot()
 
+    # Ensure a default thread exists and load chat history from store
+    store = get_session_store()
+    session_id = st.session_state.get("session_id")
+    persistence = get_persistence()
+    if store and session_id:
+        try:
+            threads = store.list_threads(session_id)
+            # Prefer an existing thread on first load; only create if none exist
+            if not st.session_state.thread_id:
+                if threads:
+                    st.session_state.thread_id = threads[0]["id"]
+                else:
+                    st.session_state.thread_id = persistence.ensure_thread(session_id, None, default_name="Chat 1") or st.session_state.get("thread_id")
+            # Load messages for current thread whenever we're not mid-stream
+            if st.session_state.thread_id and not st.session_state.get("pending_response", False):
+                def _fetch_norm():
+                    _msgs = store.get_messages(session_id, st.session_state.thread_id)
+                    return [
+                        {"role": m.get("role", "user"), "content": m.get("content", "")}
+                        for m in _msgs if isinstance(m, dict)
+                    ]
+                expected = len(st.session_state.chat_history)
+                fetched = []
+                import time as _time
+                for _ in range(6):  # up to ~1.2s total
+                    fetched = _fetch_norm()
+                    if len(fetched) >= expected or len(fetched) > 0:
+                        break
+                    _time.sleep(0.2)
+                # Prefer fetched if non-empty; otherwise keep local
+                if fetched:
+                    st.session_state.chat_history = fetched
+        except Exception as _e:
+            print(f"[Redis] init/load error: {_e}", flush=True)
+    else:
+        # If no store, ensure there is at least one logical thread id
+        if not st.session_state.thread_id:
+            st.session_state.thread_id = str(uuid.uuid4())
+    
     
     # Sidebar
     if not HIDE_SIDEBAR:
         with st.sidebar:
             st.markdown("## ⚙️ Settings")
+            # Thread switcher / creator
+            try:
+                if store and session_id:
+                    threads = store.list_threads(session_id)
+                    names = [f"{t.get('name','Chat')} — {t['id'][:8]}" for t in threads]
+                    ids = [t["id"] for t in threads]
+                    if ids:
+                        idx = ids.index(st.session_state.thread_id) if st.session_state.thread_id in ids else 0
+                        sel = st.selectbox("Chat threads", options=list(range(len(ids))), index=idx, format_func=lambda i: names[i])
+                        chosen_id = ids[sel]
+                        if chosen_id != st.session_state.thread_id:
+                            st.session_state.thread_id = chosen_id
+                            # Load selected thread history
+                            msgs = store.get_messages(session_id, chosen_id)
+                            st.session_state.chat_history = [
+                                {"role": m.get("role", "user"), "content": m.get("content", "")}
+                                for m in msgs if isinstance(m, dict)
+                            ]
+                            st.rerun()
+                    with st.expander("New chat", expanded=False):
+                        new_name = st.text_input("Name", value="New chat", key="_new_thread_name")
+                        if st.button("Create", use_container_width=True):
+                            t = store.create_thread(session_id, name=(new_name or "New chat").strip())
+                            st.session_state.thread_id = t["id"]
+                            st.session_state.chat_history = []
+                            st.rerun()
+            except Exception as e:
+                print(f"[Redis] sidebar threads error: {e}", flush=True)
+
+            # Debug status and quick check
+            st.markdown("#### 🧪 Session/Redis Debug")
+            st.code({
+                "session_id": session_id,
+                "thread_id": st.session_state.get("thread_id"),
+                "store_active": bool(store),
+            })
+            if st.button("Check Redis connectivity"):
+                try:
+                    cnt = len(store.list_threads(session_id)) if (store and session_id) else -1
+                    st.success(f"OK: threads={cnt}")
+                except Exception as e:
+                    st.error(f"Redis check failed: {e}")
+            if st.button("Refresh history from Redis"):
+                try:
+                    if store and session_id and st.session_state.thread_id:
+                        msgs = store.get_messages(session_id, st.session_state.thread_id)
+                        st.session_state.chat_history = [
+                            {"role": m.get("role", "user"), "content": m.get("content", "")}
+                            for m in msgs if isinstance(m, dict)
+                        ]
+                        st.success("History reloaded")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Reload failed: {e}")
         
             # Show last RAG context for debugging
             if st.button("Show Last RAG Context"):
@@ -908,6 +1036,13 @@ def main():
         else:
             # Add user message to history immediately; mark pending assistant reply
             st.session_state.chat_history.append({"role": "user", "content": user_input})
+            # Persist user message
+            try:
+                if session_id and st.session_state.thread_id:
+                    persistence.save_message_async(session_id, st.session_state.thread_id, "user", user_input)
+                    print(f"[Redis] queued user msg thread={st.session_state.thread_id}", flush=True)
+            except Exception as e:
+                print(f"[Persist] queue user msg error: {e}", flush=True)
             st.session_state.pending_response = True
             # Rotate placeholder for the next prompt
             try:
@@ -1062,11 +1197,23 @@ def main():
                             
                             # Update the history with complete response
                             st.session_state.chat_history[i]["content"] = full_response
+                            # Persist assistant message asynchronously
+                            try:
+                                if session_id and st.session_state.thread_id:
+                                    persistence.save_message_async(session_id, st.session_state.thread_id, "assistant", full_response)
+                                    print(f"[Redis] queued assistant msg thread={st.session_state.thread_id}", flush=True)
+                            except Exception as e:
+                                print(f"[Persist] queue assistant msg error: {e}", flush=True)
+                            # Mark streaming done so initial loader can refresh from Redis
+                            st.session_state.pending_response = False
+                            st.rerun()
                             
                         except Exception as e:
                             error_msg = f"Sorry, I encountered an error: {str(e)}"
                             message_placeholder.markdown(error_msg)
                             st.session_state.chat_history[i]["content"] = error_msg
+                            st.error(error_msg)
+                            st.session_state.pending_response = False
                 else:
                     # Regular message display - use st.chat_message to keep consistent styling
                     if message["content"]:  # Only display non-empty messages

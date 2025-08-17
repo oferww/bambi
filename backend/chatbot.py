@@ -233,6 +233,7 @@ class OferGPT:
                     print(
                         f"[RAG][DOC {i}] cosine_similarity={cosine_sim} distance={distance}\n"
                         f"metadata={meta_json}\ncontent=\n{content}\n[END DOC {i}]\n",
+                        f"[RAG][DOC {i}] content={content}\n",
                         flush=True,
                     )
                 except Exception as _e:
@@ -599,8 +600,7 @@ class OferGPT:
     def clear_knowledge_base(self):
         """Clear all data from the knowledge base."""
         self.rag_system.clear_vector_store()
-        self.conversation_history = []
-        self.memory.clear()  # Clear conversation memory too
+        self.clear_conversation_memory()
 
     ### not used ###
 
