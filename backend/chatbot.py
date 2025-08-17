@@ -232,7 +232,10 @@ class OferGPT:
                     meta_json = json.dumps(meta, ensure_ascii=False)
                     print(
                         f"[RAG][DOC {i}] cosine_similarity={cosine_sim} distance={distance}\n"
-                        f"metadata={meta_json}\ncontent=\n{content}\n[END DOC {i}]\n",
+                        f"metadata={meta_json}\n"
+                        f"content=\n"
+                        f"{content}\n"
+                        f"[END DOC {i}]\n",
                         flush=True,
                     )
                 except Exception as _e:
