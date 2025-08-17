@@ -234,7 +234,7 @@ class OferGPT:
                         f"[RAG][DOC {i}] cosine_similarity={cosine_sim} distance={distance}\n"
                         f"metadata={meta_json}\n"
                         f"content=\n"
-                        f"{content}\n"
+                        f"{content[1:-1]}\n"
                         f"[END DOC {i}]\n",
                         flush=True,
                     )
