@@ -1,6 +1,7 @@
 import os
 import PyPDF2
-import cohere
+from langchain_cohere import ChatCohere
+from langchain_core.messages import HumanMessage, SystemMessage
 from typing import Dict, List, Optional
 import tempfile
 import shutil
@@ -28,11 +29,16 @@ class PDFProcessor:
         self.uploads_dir = uploads_dir
         os.makedirs(uploads_dir, exist_ok=True)
 
-        # Initialize Cohere client for summarization
-        api_key = os.getenv("COHERE_API_KEY_EMBED")
+        # Initialize LangChain Cohere chat model for summarization
+        api_key = os.getenv("COHERE_API_KEY_CHAT")
         if not api_key:
-            raise ValueError("COHERE_API_KEY_EMBED environment variable is not set.")
-        self.cohere_client = cohere.Client(api_key)
+            raise ValueError("COHERE_API_KEY_CHAT environment variable is not set.")
+        self.chat_llm = ChatCohere(
+            model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
+            cohere_api_key=api_key,
+            temperature=0.2,
+            max_tokens=800,
+        )
         self.summary_length = summary_length
         # Performance-tunable settings via env vars
         self.summary_mode = os.getenv("PDF_SUMMARY_MODE", "summarize").strip().lower()  # chat|summarize|off
@@ -134,8 +140,7 @@ class PDFProcessor:
         return parts
 
     def _summarize_with_cohere(self, text: str) -> str:
-        """Hierarchical summarization with chunk overlap.       
-        Fallbacks to summarize API (extractiveness=high).
+        """Hierarchical summarization with chunk overlap using LangChain ChatCohere.
         """
         # Optionally cap total text to avoid excessive API calls
         capped_text = text[: self.max_chars_cap]
@@ -157,27 +162,19 @@ class PDFProcessor:
                 "Do not omit important facts, names, numbers, dates, or locations. "
                 "Quote key phrases when necessary. If the input contains 'Page N:' markers, cite them."
             )
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Summarize the following text faithfully. Preserve crucial details and include brief citations to page markers if present.\n\n{chunk_text}"},
+            msgs = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=(
+                    "Summarize the following text faithfully. Preserve crucial details and include brief "
+                    "citations to page markers if present.\n\n" + chunk_text
+                )),
             ]
-            resp = self.cohere_client.chat(
-                model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
-                messages=messages,
-                temperature=0.2,
-                max_tokens=800,
-            )
-            # cohere SDK sometimes returns resp.text for chat
-            return (getattr(resp, "text", None) or "").strip()
+            resp = self.chat_llm.invoke(msgs)
+            return (getattr(resp, "content", None) or "").strip()
 
+        # Legacy summarize API is removed to avoid direct SDK usage.
         def _summarize_chunk_via_summarize(chunk_text: str, length: str = "long") -> str:
-            resp = self.cohere_client.summarize(
-                text=chunk_text,
-                length=length,
-                format="paragraph",
-                extractiveness="high",
-            )
-            return (getattr(resp, "summary", None) or "").strip()
+            return _summarize_chunk_via_chat(chunk_text, 0)
 
         # Map step: summarize each chunk
         for i, ch in enumerate(chunks):
@@ -186,20 +183,7 @@ class PDFProcessor:
                 if model_choice.lower() in ("command-a-vision-07-2025", "command-r-plus", "command-r"):
                     # allow command-r as alternative
                     try:
-                        # Use chosen model name
-                        if model_choice != "command-r-plus":
-                            resp = self.cohere_client.chat(
-                                model=os.getenv("COHERE_CHAT_MODEL", model_choice),
-                                messages=[
-                                    {"role": "system", "content": "You are a faithful summarizer."},
-                                    {"role": "user", "content": ch},
-                                ],
-                                temperature=0.2,
-                                max_tokens=800,
-                            )
-                            summary = (getattr(resp, "text", None) or "").strip()
-                        else:
-                            summary = _summarize_chunk_via_chat(ch, i)
+                        summary = _summarize_chunk_via_chat(ch, i)
                     except Exception:
                         summary = _summarize_chunk_via_summarize(ch, self.summary_length)
                 elif self.summary_mode == "summarize":
@@ -209,19 +193,7 @@ class PDFProcessor:
                     # Auto: choose based on model_choice
                     if model_choice in ("command-r-plus", "command-r"):
                         try:
-                            if model_choice != "command-r-plus":
-                                resp = self.cohere_client.chat(
-                                    model=model_choice,
-                                    messages=[
-                                        {"role": "system", "content": "You are a faithful summarizer."},
-                                        {"role": "user", "content": ch},
-                                    ],
-                                    temperature=0.2,
-                                    max_tokens=600,
-                                )
-                                summary = (getattr(resp, "text", None) or "").strip()
-                            else:
-                                summary = _summarize_chunk_via_chat(ch, i)
+                            summary = _summarize_chunk_via_chat(ch, i)
                         except Exception:
                             summary = _summarize_chunk_via_summarize(ch, self.summary_length)
                     else:

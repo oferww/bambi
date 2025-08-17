@@ -1,17 +1,16 @@
 import os
 import chromadb
 from chromadb.config import Settings
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import CohereEmbeddings
+from langchain_chroma import Chroma
+from langchain_cohere import CohereEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
+from langchain_core.documents import Document
 # from langchain_community.vectorstores.utils import filter_complex_metadata  # Not needed, using custom processing
 from typing import List, Dict, Any
 from .utils.photo_processor import PhotoProcessor
 import json
 import hashlib
 import csv
-import cohere
 import re
 import difflib
 import concurrent.futures as cf
@@ -486,12 +485,13 @@ class RAGSystem:
         try:
             # Normalize original query
             original = (query or "").strip()
-            # 1) Spell-correct query via Cohere (best-effort)
+            # 1) Spell-correct query via LangChain ChatCohere (best-effort)
             corrected = original
             try:
+                from langchain_cohere import ChatCohere
+                from langchain_core.messages import SystemMessage, HumanMessage
                 api_key = self.cohere_key_chat
                 if api_key:
-                    c = cohere.Client(api_key=api_key)
                     system_instr = (
                         "Correct minor spelling and typos in the user query for information retrieval. "
                         "Return only the corrected query as plain text with no quotes or extra words. "
@@ -500,32 +500,34 @@ class RAGSystem:
                     )
 
                     model_name = os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025")
-                    # Simple timeout around Cohere chat call for spell-correction
+                    chat = ChatCohere(model=model_name, cohere_api_key=api_key, temperature=0, max_tokens=64)
+                    msgs = [
+                        SystemMessage(content=system_instr),
+                        HumanMessage(content=f"Query: {original}"),
+                    ]
+                    # Timeout-protected invoke
                     try:
                         timeout_s = int(os.getenv("OFERGPT_COHERE_TIMEOUT_SEC", "20"))
                     except Exception:
                         timeout_s = 20
-                    if timeout_s and timeout_s > 0:
-                        try:
+                    try:
+                        if timeout_s and timeout_s > 0:
                             with cf.ThreadPoolExecutor(max_workers=1) as ex:
-                                fut = ex.submit(
-                                    c.chat,
-                                    model=model_name,
-                                    message=f"{system_instr}\n\nQuery: {original}",
-                                    temperature=0,
-                                )
-                                resp = fut.result(timeout=timeout_s)
-                        except cf.TimeoutError:
-                            print(f"[RAG] Spell-correction timed out after {timeout_s}s; using original query", flush=True)
-                            resp = None
-                    else:
-                        resp = c.chat(model=model_name, message=f"{system_instr}\n\nQuery: {original}", temperature=0)
-                    if hasattr(resp, "text") and isinstance(resp.text, str) and resp.text.strip():
-                        raw = resp.text.strip()
-
-                        corrected = self._extract_single_query(raw, original)
-            except Exception as ce:
-                print(f"[RAG] Spell-correction skipped due to error: {ce}")
+                                fut = ex.submit(chat.invoke, msgs)
+                                resp_msg = fut.result(timeout=timeout_s)
+                        else:
+                            resp_msg = chat.invoke(msgs)
+                        txt = (getattr(resp_msg, "content", None) or "").strip()
+                        if txt:
+                            corrected = self._extract_single_query(txt, original)
+                    except cf.TimeoutError:
+                        print(f"[RAG] Spell-correction timed out after {timeout_s}s; using original query", flush=True)
+                    except Exception:
+                        # Best-effort; fall back silently
+                        pass
+            except Exception:
+                # Best-effort; ignore spell-correction errors
+                pass
 
             # Safety guard: only accept corrected if it's close to the original
             try:

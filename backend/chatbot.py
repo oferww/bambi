@@ -1,18 +1,19 @@
 import os
-import cohere
 from typing import List, Dict, Any
 import json
 import concurrent.futures as cf
 from .rag_system import RAGSystem
 from langchain.memory import ConversationSummaryBufferMemory
 from langchain.schema import BaseMessage, HumanMessage, AIMessage
+from langchain_core.documents import Document
 from langchain_community.llms import Cohere
+from langchain_cohere import ChatCohere
+from langchain.retrievers.document_compressors import CohereRerank
 
 class OferGPT:
     """Personal chatbot about Ofer using RAG with photos and memories."""
     
     def __init__(self):
-        self.cohere_client = cohere.Client(os.getenv("COHERE_API_KEY_CHAT"))
         self.rag_system = RAGSystem()
         self.conversation_history = []  # Keep for backward compatibility
         
@@ -22,6 +23,13 @@ class OferGPT:
             model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
             temperature=0.35,  # Lower temperature for summarization
             max_tokens=200
+        )
+        # Primary chat/inference model (LangChain provider)
+        self.chat_llm = ChatCohere(
+            cohere_api_key=os.getenv("COHERE_API_KEY_CHAT"),
+            model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
+            temperature=0.35,
+            max_tokens=300,
         )
         
         # Initialize conversation memory with Cohere for smart summarization
@@ -158,24 +166,16 @@ class OferGPT:
                 f"[INTENT][REQUEST] timeout={timeout_s}s prompt_len={_prompt_len} max_tokens=8",
                 flush=True,
             )
-            # Use Cohere Chat API (Generate is deprecated)
-            chat_kwargs = {
-                "message": prompt,
-                "temperature": 0.0,
-                "max_tokens": 8,
-            }
-            _chat_model = os.getenv("COHERE_CHAT_MODEL")
-            if _chat_model:
-                chat_kwargs["model"] = _chat_model
-
+            # Use LangChain ChatCohere for intent classification
+            messages = [HumanMessage(content=prompt)]
             if timeout_s and timeout_s > 0:
                 with cf.ThreadPoolExecutor(max_workers=1) as ex:
-                    fut = ex.submit(self.cohere_client.chat, **chat_kwargs)
-                    resp = fut.result(timeout=timeout_s)
+                    fut = ex.submit(self.chat_llm.invoke, messages)
+                    resp_msg = fut.result(timeout=timeout_s)
             else:
-                resp = self.cohere_client.chat(**chat_kwargs)
+                resp_msg = self.chat_llm.invoke(messages)
 
-            raw_intent = (getattr(resp, "text", None) or "").strip()
+            raw_intent = (getattr(resp_msg, "content", None) or "").strip()
             print(f"[INTENT][RAW_RESPONSE] {raw_intent!r}", flush=True)
             intent = raw_intent.lower()
             if intent in self._intent_labels:
@@ -338,7 +338,7 @@ class OferGPT:
         return self._compute_relevant_context(query)
     
     def apply_rerank(self, query: str, retrieved: list[dict]) -> list[dict]:
-        """Apply rerank to retrieved docs using Cohere Rerank.
+        """Apply rerank to retrieved docs using LangChain CohereRerank.
 
         Env flags:
         - OFERGPT_RERANK: '1' => enable (default '0')
@@ -358,50 +358,46 @@ class OferGPT:
                 rr_top_k = 20
 
             head = retrieved[:rr_top_k]
-            candidates = [d.get("content", "") or "" for d in head]
-            # If all candidates are empty, nothing to do
-            if not any(candidates):
+            # Create LangChain Documents for reranker
+            docs = [
+                Document(page_content=(d.get("content", "") or ""), metadata=(d.get("metadata", {}) or {}))
+                for d in head
+            ]
+            if not any(doc.page_content for doc in docs):
                 return retrieved
 
             rerank_model = os.getenv("OFERGPT_RERANK_MODEL", "rerank-english-v3.0")
-            try:
-                rr = self.cohere_client.rerank(
-                    model=rerank_model,
-                    query=query,
-                    documents=candidates,
-                    top_n=len(candidates),
-                )
-            except Exception:
-                return retrieved
-
-            results = getattr(rr, "results", None) or []
-            if not results:
-                return retrieved
-
-            # Sort by relevance_score desc
-            try:
-                ordered = sorted(
-                    [(r.index, getattr(r, "relevance_score", 0.0)) for r in results],
-                    key=lambda x: x[1],
-                    reverse=True,
-                )
-            except Exception:
-                return retrieved
-
-            # Reassemble: re-ordered head + untouched tail
-            try:
-                reordered_head = [head[idx] for idx, _ in ordered if 0 <= idx < len(head)]
-                tail = retrieved[len(head):]
-                return reordered_head + tail
-            except Exception:
-                return retrieved
-        except Exception:
+            compressor = CohereRerank(
+                cohere_api_key=os.getenv("COHERE_API_KEY_CHAT"),
+                model=rerank_model,
+            )
+            ranked_docs = compressor.compress_documents(docs, query)
+            # Map ranked_docs order back to original dicts by content identity
+            content_to_items = {}
+            for idx, d in enumerate(head):
+                key = (d.get("content", "") or "")
+                content_to_items.setdefault(key, []).append((idx, d))
+            new_head: List[dict] = []
+            for rd in ranked_docs:
+                key = rd.page_content
+                lst = content_to_items.get(key)
+                if lst:
+                    _, item = lst.pop(0)
+                    new_head.append(item)
+            # Append any leftover in original order
+            for key, lst in content_to_items.items():
+                for _, item in lst:
+                    new_head.append(item)
+            tail = retrieved[len(head):]
+            return new_head + tail
+        except Exception as _e:
+            print(f"[RERANK] Falling back without rerank due to error: {_e}", flush=True)
             return retrieved
 
     ### Generation (LLM output) ###
 
     def generate_response_with_memory(self, query: str, context: str, memory_context: str) -> str:
-        """Generate response using Cohere with RAG context and conversation memory."""
+        """Generate response using LangChain ChatCohere with RAG context and conversation memory."""
         try:
             # Truncate memory to stay within token limits
             try:
@@ -421,60 +417,43 @@ class OferGPT:
                     f"User message: {query}\n\n"
                     "Your response:"
                 )
-            # Log full Cohere API call parameters
+            # Log request parameters (LangChain ChatCohere)
             params = {
-                "endpoint": "generate",
-                "model": os.getenv("COHERE_CHAT_MODEL"),  # may be None for generate()
+                "provider": "langchain_cohere.ChatCohere",
+                "model": os.getenv("COHERE_CHAT_MODEL", "command-r-plus"),
                 "temperature": 0.35,
                 "max_tokens": 300,
-                "p": 0.9,
-                "stop_sequences": ["\n\nUser:", "\n\nQ:", "User question:", "Context about"],
-                "prompt_preview": prompt[:500]
+                "prompt_preview": prompt[:500],
             }
-            print(f"[COHERE][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
-            # Simple timeout around Cohere call
+            print(f"[CHAT][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
+            # Simple timeout around call
             try:
                 timeout_s = int(os.getenv("OFERGPT_COHERE_TIMEOUT_SEC", "25"))
             except Exception:
                 timeout_s = 20
+            messages = [HumanMessage(content=prompt)]
             if timeout_s and timeout_s > 0:
                 with cf.ThreadPoolExecutor(max_workers=1) as ex:
-                    fut = ex.submit(
-                        self.cohere_client.generate,
-                        prompt=prompt,
-                        temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
-                        max_tokens=300,
-                        p=0.9,
-                        stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
-                    )
-                    response = fut.result(timeout=timeout_s)
+                    fut = ex.submit(self.chat_llm.invoke, messages)
+                    resp_msg = fut.result(timeout=timeout_s)
             else:
-                response = self.cohere_client.generate(
-                    prompt=prompt,
-                    temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
-                    max_tokens=300,
-                    p=0.9,
-                    stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
-                )
-            # Log full response object (best-effort)
+                resp_msg = self.chat_llm.invoke(messages)
+            # Log response content (best-effort)
             try:
-                print(f"[COHERE][RESPONSE] {response}", flush=True)
+                print(f"[CHAT][RESPONSE] {getattr(resp_msg, 'content', None)!r}", flush=True)
             except Exception:
-                try:
-                    print(f"[COHERE][RESPONSE_DICT] {getattr(response, '__dict__', {})}", flush=True)
-                except Exception:
-                    pass
-            answer = response.generations[0].text.strip()
+                pass
+            answer = (getattr(resp_msg, "content", None) or "").strip()
             return answer
         except cf.TimeoutError:
-            print("⏳ Cohere generate() timed out; returning fallback message.", flush=True)
+            print("⏳ Chat invocation timed out; returning fallback message.", flush=True)
             return "I'm sorry, the request took too long. Please try again."
         except Exception as e:
             print(f"Error generating response with memory: {e}")
             return "I'm sorry, I'm having trouble generating a response right now. Please try again."
 
     def stream_response_with_memory(self, query: str, context: str, memory_context: str):
-        """Generate streaming response using Cohere with RAG context and conversation memory."""
+        """Generate streaming response using LangChain ChatCohere with RAG context and conversation memory."""
         import time
         try:
             print("🔄 Starting response generation...", flush=True)
@@ -486,14 +465,7 @@ class OferGPT:
             mem_text = memory_context if memory_context else "This is the start of our conversation."
             mem_text = self._truncate(mem_text, mem_budget)
             if context and context.strip():
-                prompt = (
-                    f"{self.system_prompt}\n\n"
-                    f"Previous conversation summary:\n{mem_text}\n\n"
-                    f"Current context about Ofer:\n{context}\n\n"
-                    f"User question: {query}\n\n"
-                    "Please provide a helpful response based STRICTLY on the context about Ofer and our previous conversation. "
-                    "DO NOT invent, assume, or make up any details not explicitly mentioned in the context above:"
-                )
+                prompt = f"{self.system_prompt}\n\nPrevious conversation summary:\n{mem_text}\n\nCurrent context about Ofer:\n{context}\n\nUser question: {query}\n\nPlease provide a helpful response based STRICTLY on the context about Ofer and our previous conversation. DO NOT invent, assume, or make up any details not explicitly mentioned in the context above:"
             else:
                 # Smalltalk/casual mode (no RAG context)
                 prompt = (
@@ -504,76 +476,43 @@ class OferGPT:
                     "Your response:"
                 )
             try:
-                print("🚀 Attempting real Cohere streaming...", flush=True)
-                # Log full Cohere API call parameters for streaming
+                print("🚀 Starting LangChain ChatCohere streaming...", flush=True)
                 params = {
-                    "endpoint": "generate",
-                    "model": os.getenv("COHERE_CHAT_MODEL"),  # may be None for generate()
+                    "provider": "langchain_cohere.ChatCohere",
+                    "model": os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
                     "temperature": 0.35,
                     "max_tokens": 300,
-                    "p": 0.9,
-                    "stop_sequences": ["\n\nUser:", "\n\nQ:", "User question:", "Context about"],
                     "stream": True,
-                    "prompt_preview": prompt[:500]
+                    "prompt_preview": prompt[:500],
                 }
-                print(f"[COHERE][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
-                response = self.cohere_client.generate(
-                    prompt=prompt,
-                    temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
-                    max_tokens=300,
-                    p=0.9,
-                    stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"],
-                    stream=True
-                )
-                print("✅ Real Cohere streaming is working!", flush=True)
+                print(f"[CHAT][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
                 full_response = ""
                 token_count = 0
-                for token in response:
-                    text_segment = None
-                    # Common Cohere stream shapes
-                    if hasattr(token, 'generations') and getattr(token, 'generations'):
-                        try:
-                            text_segment = token.generations[0].text
-                        except Exception:
-                            text_segment = None
-                    if text_segment is None and hasattr(token, 'text'):
-                        text_segment = getattr(token, 'text')
-                    # Some SDKs may yield dict-like events
-                    if text_segment is None and isinstance(token, dict):
-                        text_segment = token.get('text') or token.get('delta') or token.get('token')
-                    if text_segment:
-                        full_response += text_segment
+                for chunk in self.chat_llm.stream([HumanMessage(content=prompt)]):
+                    seg = getattr(chunk, "content", None)
+                    if seg:
+                        full_response += seg
                         token_count += 1
-                        yield text_segment
-                print(f"✅ Real streaming completed: {token_count} tokens received", flush=True)
-                # If nothing streamed, force fallback
+                        yield seg
+                print(f"✅ Streaming completed: {token_count} chunks", flush=True)
                 if token_count == 0:
-                    raise RuntimeError("Streaming returned 0 tokens; forcing fallback to non-streaming generation.")
+                    raise RuntimeError("Streaming returned 0 chunks; forcing fallback to non-streaming generation.")
             except Exception as stream_error:
-                print(f"❌ Real streaming failed: {stream_error}", flush=True)
+                print(f"❌ Streaming failed: {stream_error}", flush=True)
                 print("🔄 Falling back to simulated streaming...", flush=True)
-                response = self.cohere_client.generate(
-                    prompt=prompt,
-                    temperature=0.35,  # Lower temp for better instruction-following on retrieval tasks
-                    max_tokens=300,
-                    p=0.9,
-                    stop_sequences=["\n\nUser:", "\n\nQ:", "User question:", "Context about"]
-                )
-                full_text = response.generations[0].text.strip()
+                resp_msg = self.chat_llm.invoke([HumanMessage(content=prompt)])
+                full_text = (getattr(resp_msg, "content", None) or "").strip()
                 print(f"✅ Generated complete response: {len(full_text)} characters", flush=True)
                 words = full_text.split(' ')
                 print(f"🎭 Simulating streaming: {len(words)} words", flush=True)
                 for i, word in enumerate(words):
-                    if i == 0:
-                        yield word
-                    else:
-                        yield ' ' + word
+                    yield ('' if i == 0 else ' ') + word
                     time.sleep(0.05)
                 print("✅ Simulated streaming completed", flush=True)
         except Exception as e:
             print(f"Error generating streaming response: {e}", flush=True)
             yield "I'm sorry, I'm having trouble generating a response right now. Please try again."
-        
+
     ### Memory management ###
 
     def clear_conversation_memory(self):

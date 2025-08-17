@@ -19,10 +19,14 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 from backend.rag_system import RAGSystem
 # We intentionally import the internal helper; it is stable within this repo
 from backend.ingestion.dispatcher import _ingest_generic_json
+
+# Load environment variables from .env for local runs
+load_dotenv()
 
 
 def embed_jsons(dir_path: str | Path = "./data/uploads/json") -> int:

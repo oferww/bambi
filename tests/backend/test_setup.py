@@ -37,10 +37,10 @@ def test_imports():
         return False
 
     try:
-        import cohere  # noqa: F401
-        print("✅ Cohere imported")
+        from langchain_cohere import ChatCohere  # noqa: F401
+        print("✅ LangChain ChatCohere imported")
     except ImportError as e:
-        print(f"❌ Cohere import failed: {e}")
+        print(f"❌ LangChain ChatCohere import failed: {e}")
         return False
 
     try:
@@ -51,8 +51,8 @@ def test_imports():
         return False
 
     try:
-        from langchain_community.embeddings import CohereEmbeddings  # noqa: F401
-        print("✅ LangChain Cohere embeddings imported")
+        from langchain_cohere import CohereEmbeddings  # noqa: F401
+        print("✅ LangChain CohereEmbeddings imported")
     except ImportError as e:
         print(f"❌ LangChain import failed: {e}")
         return False
@@ -132,17 +132,17 @@ def test_cohere_api():
     print("🔍 Testing Cohere API...")
 
     try:
-        import cohere
-        client = cohere.Client(os.getenv("COHERE_API_KEY_CHAT"))
-
-        # Test with a simple request
-        response = client.generate(
-            model="command-a-vision-07-2025",
-            prompt="Hello",
-            max_tokens=10,
-        )
-        _ = response
-        print("✅ Cohere API connection successful")
+        from langchain_cohere import ChatCohere
+        from langchain_core.messages import HumanMessage
+        api_key = os.getenv("COHERE_API_KEY_CHAT")
+        if not api_key:
+            print("❌ COHERE_API_KEY_CHAT is not set")
+            return False
+        model = os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025")
+        llm = ChatCohere(model=model, cohere_api_key=api_key, temperature=0)
+        msg = llm.invoke([HumanMessage(content="Hello")])
+        _ = getattr(msg, "content", "")
+        print("✅ Cohere (via LangChain ChatCohere) connection successful")
         return True
     except Exception as e:
         print(f"❌ Cohere API test failed: {e}")

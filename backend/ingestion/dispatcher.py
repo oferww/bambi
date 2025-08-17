@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import List, Tuple
 
 # Streamlit's UploadedFile type is duck-typed here (has .name, .type, .getbuffer())
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 from ..rag_system import RAGSystem
 from ..utils.pdf_processor import PDFProcessor

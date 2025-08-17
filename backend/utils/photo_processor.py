@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Dict, Optional, Tuple
 import json
 from geopy.geocoders import Nominatim
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 from google.cloud import vision
 import piexif
 import piexif.helper
@@ -22,7 +22,7 @@ class PhotoProcessor:
         self.photos_dir = photos_dir
         os.makedirs(photos_dir, exist_ok=True)
         self.geolocator = Nominatim(user_agent="ofergpt_chatbot")
-        self.translator = Translator()
+        self.translator = GoogleTranslator(source='auto', target='en')
         # Initialize OCR reader (lazy loading to avoid startup delay) - COMMENTED OUT
         # self._ocr_reader = None
     
@@ -202,9 +202,8 @@ class PhotoProcessor:
             
             print(f"[TRANSLATE] Translating: {location_name}", flush=True)
             
-            # Use Google Translate to translate to English
-            translation = self.translator.translate(location_name, dest='en')
-            translated_text = translation.text
+            # Use deep-translator GoogleTranslator to translate to English
+            translated_text = self.translator.translate(location_name)
             
             print(f"[TRANSLATE] Result: {location_name} -> {translated_text}", flush=True)
             return translated_text

@@ -22,8 +22,8 @@ from typing import List, Optional, Dict, Any
 
 import chromadb
 from chromadb.config import Settings
-from langchain_community.embeddings import CohereEmbeddings
-import cohere
+from langchain_cohere import CohereEmbeddings
+from langchain.retrievers.document_compressors import CohereRerank
 
 
 COLLECTION_NAME = "ofergpt_memories"
@@ -132,14 +132,24 @@ def search_topk(
             candidates = [d.get("content", "") or "" for d in head]
             if any(candidates):
                 rerank_model = os.getenv("OFERGPT_RERANK_MODEL", "rerank-english-v3.0")
-                ch = cohere.Client(os.getenv("COHERE_API_KEY_CHAT"))
-                rr = ch.rerank(model=rerank_model, query=query_text, documents=candidates, top_n=len(candidates))
-                results = getattr(rr, "results", None) or []
-                ordered = sorted(
-                    [(r.index, getattr(r, "relevance_score", 0.0)) for r in results],
-                    key=lambda x: x[1], reverse=True,
+                compressor = CohereRerank(
+                    model=rerank_model,
+                    cohere_api_key=os.getenv("COHERE_API_KEY_CHAT"),
+                    top_n=len(candidates),
                 )
-                reordered_head = [head[idx] for idx, _ in ordered if 0 <= idx < len(head)]
+                # Build dummy Documents for reranker
+                from langchain_core.documents import Document
+                lang_docs = [Document(page_content=txt) for txt in candidates]
+                ranked = compressor.compress_documents(lang_docs, query_text)
+                # Map ranked docs to original indices by content match (stable, best-effort)
+                order = []
+                content_to_index = { (d.get("content") or ""): i for i, d in enumerate(head) }
+                for rd in ranked:
+                    idx = content_to_index.get(rd.page_content)
+                    if idx is not None:
+                        order.append(idx)
+                ordered = sorted(list(set(order)), key=lambda i: order.index(i))
+                reordered_head = [head[i] for i in ordered]
                 tail = docs[len(head):]
                 docs = reordered_head + tail
     except Exception as _e:
