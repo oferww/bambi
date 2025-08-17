@@ -450,7 +450,11 @@ class OferGPT:
             return "I'm sorry, the request took too long. Please try again."
         except Exception as e:
             print(f"Error generating response with memory: {e}")
-            return "I'm sorry, I'm having trouble generating a response right now. Please try again."
+            return (
+                "I'm sorry, I'm having trouble generating a response right now. "
+                "I am using a trial key, which is limited to 10 API calls/minute. "
+                "Please try again in a few seconds."
+            )
 
     def stream_response_with_memory(self, query: str, context: str, memory_context: str):
         """Generate streaming response using LangChain ChatCohere with RAG context and conversation memory."""
@@ -511,7 +515,9 @@ class OferGPT:
                 print("✅ Simulated streaming completed", flush=True)
         except Exception as e:
             print(f"Error generating streaming response: {e}", flush=True)
-            yield "I'm sorry, I'm having trouble generating a response right now. Please try again."
+            yield "I'm sorry, I'm having trouble generating a response right now. \
+            I am using a trial key, which is limited to 10 API calls/minute. \
+            Please try again in a few seconds."
 
     ### Memory management ###
 
