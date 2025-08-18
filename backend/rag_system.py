@@ -69,6 +69,8 @@ class RAGSystem:
     
     def __init__(self, embeddings_dir: str = "./data/embeddings"):
         self.embeddings_dir = embeddings_dir
+        # Optional API logger injected by chatbot: callable(api_type, which_key, note)
+        self.api_logger = None
         os.makedirs(embeddings_dir, exist_ok=True)
         
         # Initialize Cohere embeddings (use only EMBED or CHAT keys, no generic COHERE_API_KEY)
@@ -85,6 +87,12 @@ class RAGSystem:
             model=self.embedding_model_name,
             cohere_api_key=self.cohere_key_embed
         )
+        # Separate embedding client for QUERY-TIME embeddings using the chat key,
+        # while keeping the same embedding model to preserve vector space compatibility
+        self.query_embeddings = CohereEmbeddings(
+            model=self.embedding_model_name,
+            cohere_api_key=self.cohere_key_chat
+        )
         
         # Initialize ChromaDB
         self.chroma_client = chromadb.PersistentClient(
@@ -96,6 +104,12 @@ class RAGSystem:
         self.vectorstore = Chroma(
             client=self.chroma_client,
             embedding_function=self.embeddings,
+            collection_name="ofergpt_memories"
+        )
+        # Parallel vector store handle for queries that uses the query-time embedding function
+        self.vectorstore_query = Chroma(
+            client=self.chroma_client,
+            embedding_function=self.query_embeddings,
             collection_name="ofergpt_memories"
         )
         
@@ -511,10 +525,30 @@ class RAGSystem:
                     except Exception:
                         timeout_s = 20
                     try:
+                        # Log Cohere chat usage for spell-correction (CHAT key)
+                        _alog = getattr(self, "api_logger", None)
+                        if callable(_alog):
+                            _alog("chat", "COHERE_API_KEY_CHAT", note="rag_spell_correct")
+                        ex = None
                         if timeout_s and timeout_s > 0:
-                            with cf.ThreadPoolExecutor(max_workers=1) as ex:
+                            try:
+                                ex = cf.ThreadPoolExecutor(max_workers=1)
                                 fut = ex.submit(chat.invoke, msgs)
                                 resp_msg = fut.result(timeout=timeout_s)
+                            except cf.TimeoutError:
+                                print(f"[RAG] Spell-correction timed out after {timeout_s}s; proceeding with original query.", flush=True)
+                                if ex is not None:
+                                    try:
+                                        ex.shutdown(wait=False, cancel_futures=True)
+                                    except Exception:
+                                        pass
+                                resp_msg = None
+                            finally:
+                                if ex is not None:
+                                    try:
+                                        ex.shutdown(wait=False, cancel_futures=True)
+                                    except Exception:
+                                        pass
                         else:
                             resp_msg = chat.invoke(msgs)
                         txt = (getattr(resp_msg, "content", None) or "").strip()
@@ -591,7 +625,11 @@ class RAGSystem:
             
             for idx, q in enumerate(queries):
                 try:
-                    results = self.vectorstore.similarity_search_with_score(q, k=fetch_k)
+                    # Log query-time embeddings use (CHAT key)
+                    _alog = getattr(self, "api_logger", None)
+                    if callable(_alog):
+                        _alog("embed", "COHERE_API_KEY_CHAT", note="rag_similarity_search")
+                    results = self.vectorstore_query.similarity_search_with_score(q, k=fetch_k)
                 except Exception as inner_e:
                     print(f"[RAG] Search failed for query variant {idx}: {inner_e}")
                     # Retry once with a smaller k if possible
@@ -602,7 +640,10 @@ class RAGSystem:
                     if smaller_k < fetch_k:
                         try:
                             print(f"[RAG] Retrying search with smaller k={smaller_k}")
-                            results = self.vectorstore.similarity_search_with_score(q, k=smaller_k)
+                            _alog = getattr(self, "api_logger", None)
+                            if callable(_alog):
+                                _alog("embed", "COHERE_API_KEY_CHAT", note="rag_similarity_retry")
+                            results = self.vectorstore_query.similarity_search_with_score(q, k=smaller_k)
                         except Exception as inner_e2:
                             print(f"[RAG] Retry failed for query variant {idx}: {inner_e2}")
                             continue
@@ -714,6 +755,11 @@ class RAGSystem:
                 client=self.chroma_client,
                 collection_name="ofergpt_memories",
                 embedding_function=self.embeddings,
+            )
+            self.vectorstore_query = Chroma(
+                client=self.chroma_client,
+                collection_name="ofergpt_memories",
+                embedding_function=self.query_embeddings,
             )
             print("✅ Empty collection re-created", flush=True)
         except Exception as e:

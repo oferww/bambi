@@ -134,7 +134,7 @@ def search_topk(
                 rerank_model = os.getenv("OFERGPT_RERANK_MODEL", "rerank-english-v3.0")
                 compressor = CohereRerank(
                     model=rerank_model,
-                    cohere_api_key=os.getenv("COHERE_API_KEY_CHAT"),
+                    cohere_api_key=os.getenv("COHERE_API_KEY_EMBED"),
                     top_n=len(candidates),
                 )
                 # Build dummy Documents for reranker

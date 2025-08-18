@@ -30,9 +30,9 @@ class PDFProcessor:
         os.makedirs(uploads_dir, exist_ok=True)
 
         # Initialize LangChain Cohere chat model for summarization
-        api_key = os.getenv("COHERE_API_KEY_CHAT")
+        api_key = os.getenv("COHERE_API_KEY_EMBED")
         if not api_key:
-            raise ValueError("COHERE_API_KEY_CHAT environment variable is not set.")
+            raise ValueError("COHERE_API_KEY_EMBED environment variable is not set.")
         self.chat_llm = ChatCohere(
             model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
             cohere_api_key=api_key,
