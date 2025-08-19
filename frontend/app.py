@@ -7,6 +7,10 @@ from backend.utils.photo_processor import PhotoProcessor
 from backend.rag_system import RAGSystem
 from backend.utils.s3_sync import sync_embeddings_from_env
 import json
+import ast
+import re
+import base64
+import concurrent.futures as cf
 from datetime import datetime
 import pandas as pd
 from backend.ingestion import (
@@ -238,7 +242,6 @@ st.markdown(
 # Ensures the logo is present immediately and not tied to first prompt re-run
 _header_logo = os.path.join(BASE_DIR, "assets", "bambi.png")
 if os.path.exists(_header_logo):
-    import base64
     with open(_header_logo, "rb") as _f:
         _logo_b64 = base64.b64encode(_f.read()).decode("utf-8")
     st.markdown(
@@ -696,7 +699,6 @@ def main():
                 data = collection.get()
                 posts = []
                 if data and data.get("metadatas"):
-                    import ast as _ast
                     aggregated = {}
                     docs = data.get("documents", []) or []
                     metas = data.get("metadatas", []) or []
@@ -736,8 +738,7 @@ def main():
                                     try:
                                         coords_obj = json.loads(s)
                                     except Exception:
-                                        import ast as __ast
-                                        coords_obj = __ast.literal_eval(s)
+                                        coords_obj = ast.literal_eval(s)
                                     if isinstance(coords_obj, dict):
                                         coords = coords_obj
                                 except Exception:
@@ -745,9 +746,8 @@ def main():
                             # Regex fallback for strings that aren't valid JSON/literal
                             if not isinstance(coords, dict):
                                 try:
-                                    import re as __re
-                                    mlat = __re.search(r"lat[^\d-]*(-?\d+(?:\.\d+)?)", s, flags=__re.IGNORECASE)
-                                    mlon = __re.search(r"lon[gitude]*[^\d-]*(-?\d+(?:\.\d+)?)", s, flags=__re.IGNORECASE)
+                                    mlat = re.search(r"lat[^\d-]*(-?\d+(?:\.\d+)?)", s, flags=re.IGNORECASE)
+                                    mlon = re.search(r"lon[gitude]*[^\d-]*(-?\d+(?:\.\d+)?)", s, flags=re.IGNORECASE)
                                     if mlat and mlon:
                                         coords = {"lat": float(mlat.group(1)), "lon": float(mlon.group(1))}
                                 except Exception:
@@ -965,11 +965,11 @@ def main():
             icon1 = os.path.join(BASE_DIR, "assets", "icon.png")
             icon_path = icon2 if os.path.exists(icon2) else (icon1 if os.path.exists(icon1) else "")
             if icon_path:
-                import base64
                 with open(icon_path, "rb") as _f:
                     _b64 = base64.b64encode(_f.read()).decode("utf-8")
                 assistant_avatar = f"data:image/png;base64,{_b64}"
-        except Exception:
+        except Exception as e:
+            print(e)
             assistant_avatar = None
         
         # If a user message was just submitted, add an assistant placeholder now
@@ -1047,18 +1047,36 @@ def main():
                         try:
                             # Get the user input from the previous message
                             user_input = st.session_state.chat_history[i-1]["content"]
-                            
-                            # Small delay to show the loading indicator
-                            import time
-                            time.sleep(0.5)
-                            
-                            # Stream the response word by word
-                            for token in st.session_state.chatbot.chat_stream(user_input):
-                                full_response += token
+
+                            # Enforce a single global timeout ONLY for starting the stream (first token)
+                            global_timeout = int(os.getenv("OFERGPT_GLOBAL_TIMEOUT_SEC", "20"))
+
+                            gen = st.session_state.chatbot.chat_stream(user_input)
+                            first_token = None
+                            with cf.ThreadPoolExecutor(max_workers=1) as ex:
+                                fut = ex.submit(next, gen)
+                                try:
+                                    first_token = fut.result(timeout=max(1, global_timeout))
+                                except Exception as e:
+                                    # Unexpected start error
+                                    full_response = (
+                                        "I'm sorry, I'm having trouble generating a response right now. "
+                                        "I am using a trial key, which is limited to 10 API calls/minute. "
+                                        "Please try again in a few seconds."
+                                    )
+                                    print(f"[UI] Error starting stream: {e}", flush=True)
+                                    message_placeholder.markdown(full_response)
+                                    first_token = None
+
+                            # If we have the first token, stream the rest without further timeout caps
+                            if first_token is not None:
+                                full_response += first_token
                                 message_placeholder.markdown(full_response + "▌")
-                            
-                            # Remove cursor and finalize
-                            message_placeholder.markdown(full_response)
+                                for token in gen:
+                                    full_response += token
+                                    message_placeholder.markdown(full_response + "▌")
+                                # Remove cursor and finalize
+                                message_placeholder.markdown(full_response)
                             
                             # Update the history with complete response
                             st.session_state.chat_history[i]["content"] = full_response

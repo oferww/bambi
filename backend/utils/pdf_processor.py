@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 import tempfile
 import shutil
 from datetime import datetime
+from .key_bank import get_keybank
 
 # Optional fallbacks for PDF text extraction
 try:
@@ -29,16 +30,8 @@ class PDFProcessor:
         self.uploads_dir = uploads_dir
         os.makedirs(uploads_dir, exist_ok=True)
 
-        # Initialize LangChain Cohere chat model for summarization
-        api_key = os.getenv("COHERE_API_KEY_EMBED")
-        if not api_key:
-            raise ValueError("COHERE_API_KEY_EMBED environment variable is not set.")
-        self.chat_llm = ChatCohere(
-            model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
-            cohere_api_key=api_key,
-            temperature=0.2,
-            max_tokens=800,
-        )
+        # Initialize KeyBank; we'll create ChatCohere per call with best chat key
+        self._keybank = get_keybank()
         self.summary_length = summary_length
         # Performance-tunable settings via env vars
         self.summary_mode = os.getenv("PDF_SUMMARY_MODE", "summarize").strip().lower()  # chat|summarize|off
@@ -169,7 +162,15 @@ class PDFProcessor:
                     "citations to page markers if present.\n\n" + chunk_text
                 )),
             ]
-            resp = self.chat_llm.invoke(msgs)
+            # Acquire a fresh chat key from KeyBank and instantiate ChatCohere per call
+            _chat_key = self._keybank.get_key("pdf_summary")
+            chat = ChatCohere(
+                model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
+                cohere_api_key=_chat_key,
+                temperature=0.2,
+                max_tokens=800,
+            )
+            resp = chat.invoke(msgs)
             return (getattr(resp, "content", None) or "").strip()
 
         # Legacy summarize API is removed to avoid direct SDK usage.

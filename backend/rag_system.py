@@ -13,7 +13,7 @@ import hashlib
 import csv
 import re
 import difflib
-import concurrent.futures as cf
+from .utils.key_bank import get_keybank
  
  
 
@@ -72,6 +72,8 @@ class RAGSystem:
         # Optional API logger injected by chatbot: callable(api_type, which_key, note)
         self.api_logger = None
         os.makedirs(embeddings_dir, exist_ok=True)
+        # Initialize KeyBank for rotating Cohere chat keys
+        self._keybank = get_keybank()
         
         # Initialize Cohere embeddings (use only EMBED or CHAT keys, no generic COHERE_API_KEY)
         api_key_embed = os.getenv("COHERE_API_KEY_EMBED")
@@ -504,8 +506,9 @@ class RAGSystem:
             try:
                 from langchain_cohere import ChatCohere
                 from langchain_core.messages import SystemMessage, HumanMessage
-                api_key = self.cohere_key_chat
-                if api_key:
+                # Acquire best-available chat key (and index) from KeyBank per call
+                _chat_key, _chat_idx = self._keybank.get_key_with_index("rag_spell_correct")
+                if _chat_key:
                     system_instr = (
                         "Correct minor spelling and typos in the user query for information retrieval. "
                         "Return only the corrected query as plain text with no quotes or extra words. "
@@ -514,51 +517,41 @@ class RAGSystem:
                     )
 
                     model_name = os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025")
-                    chat = ChatCohere(model=model_name, cohere_api_key=api_key, temperature=0, max_tokens=64)
                     msgs = [
                         SystemMessage(content=system_instr),
                         HumanMessage(content=f"Query: {original}"),
                     ]
-                    # Timeout-protected invoke
-                    try:
-                        timeout_s = int(os.getenv("OFERGPT_COHERE_TIMEOUT_SEC", "20"))
-                    except Exception:
-                        timeout_s = 20
-                    try:
-                        # Log Cohere chat usage for spell-correction (CHAT key)
-                        _alog = getattr(self, "api_logger", None)
-                        if callable(_alog):
-                            _alog("chat", "COHERE_API_KEY_CHAT", note="rag_spell_correct")
-                        ex = None
-                        if timeout_s and timeout_s > 0:
+                    # Retry without per-step timeouts; global timeout enforced by caller (frontend)
+                    max_tries = self._keybank.key_count()
+                    last_err = None
+                    for _ in range(max_tries):
+                        # Fetch a fresh key and rebuild client each attempt so we can rotate on failures
+                        _chat_key, _chat_idx = self._keybank.get_key_with_index("rag_spell_correct")
+                        chat = ChatCohere(model=model_name, cohere_api_key=_chat_key, temperature=0, max_tokens=64)
+                        try:
+                            # Log Cohere chat usage for spell-correction (CHAT key) with current key index
                             try:
-                                ex = cf.ThreadPoolExecutor(max_workers=1)
-                                fut = ex.submit(chat.invoke, msgs)
-                                resp_msg = fut.result(timeout=timeout_s)
-                            except cf.TimeoutError:
-                                print(f"[RAG] Spell-correction timed out after {timeout_s}s; proceeding with original query.", flush=True)
-                                if ex is not None:
-                                    try:
-                                        ex.shutdown(wait=False, cancel_futures=True)
-                                    except Exception:
-                                        pass
-                                resp_msg = None
-                            finally:
-                                if ex is not None:
-                                    try:
-                                        ex.shutdown(wait=False, cancel_futures=True)
-                                    except Exception:
-                                        pass
-                        else:
+                                api_logger = getattr(self, "api_logger", None)
+                                if callable(api_logger):
+                                    api_logger("chat", "COHERE_API_KEY_CHAT", note="rag_spell_correct", key_index=_chat_idx)
+                            except Exception:
+                                pass
                             resp_msg = chat.invoke(msgs)
-                        txt = (getattr(resp_msg, "content", None) or "").strip()
-                        if txt:
-                            corrected = self._extract_single_query(txt, original)
-                    except cf.TimeoutError:
-                        print(f"[RAG] Spell-correction timed out after {timeout_s}s; using original query", flush=True)
-                    except Exception:
-                        # Best-effort; fall back silently
-                        pass
+                            txt = (getattr(resp_msg, "content", None) or "").strip()
+                            if txt:
+                                corrected = self._extract_single_query(txt, original)
+                            break
+                        except Exception as e:
+                            last_err = e
+                            try:
+                                print(f"[CHAT][ERROR] note=rag_spell_correct key_index={_chat_idx} error={e}", flush=True)
+                            except Exception:
+                                pass
+                            try:
+                                self._keybank.penalize_key(_chat_idx, seconds=1.5)
+                            except Exception:
+                                pass
+                            continue
             except Exception:
                 # Best-effort; ignore spell-correction errors
                 pass
@@ -625,13 +618,26 @@ class RAGSystem:
             
             for idx, q in enumerate(queries):
                 try:
-                    # Log query-time embeddings use (CHAT key)
-                    _alog = getattr(self, "api_logger", None)
-                    if callable(_alog):
-                        _alog("embed", "COHERE_API_KEY_CHAT", note="rag_similarity_search")
+                    # Rotate query-time embedding key per call and log key index
+                    _emb_key, _emb_idx = self._keybank.get_key_with_index("embed_query")
+                    try:
+                        from langchain_cohere import CohereEmbeddings as _CE
+                        self.vectorstore_query._embedding_function = _CE(
+                            model=self.embedding_model_name,
+                            cohere_api_key=_emb_key,
+                        )
+                    except Exception:
+                        pass
+                    api_logger = getattr(self, "api_logger", None)
+                    if callable(api_logger):
+                        api_logger("embed", "COHERE_API_KEY_CHAT", note="rag_similarity_search", key_index=_emb_idx)
                     results = self.vectorstore_query.similarity_search_with_score(q, k=fetch_k)
                 except Exception as inner_e:
                     print(f"[RAG] Search failed for query variant {idx}: {inner_e}")
+                    try:
+                        self._keybank.penalize_key(_emb_idx, seconds=1.5)
+                    except Exception:
+                        pass
                     # Retry once with a smaller k if possible
                     try:
                         smaller_k = max(int(k), min(200, fetch_k // 2))
@@ -640,12 +646,26 @@ class RAGSystem:
                     if smaller_k < fetch_k:
                         try:
                             print(f"[RAG] Retrying search with smaller k={smaller_k}")
-                            _alog = getattr(self, "api_logger", None)
-                            if callable(_alog):
-                                _alog("embed", "COHERE_API_KEY_CHAT", note="rag_similarity_retry")
+                            # Rotate a fresh key for retry as well
+                            _emb_key2, _emb_idx2 = self._keybank.get_key_with_index("embed_query_retry")
+                            try:
+                                from langchain_cohere import CohereEmbeddings as _CE
+                                self.vectorstore_query._embedding_function = _CE(
+                                    model=self.embedding_model_name,
+                                    cohere_api_key=_emb_key2,
+                                )
+                            except Exception:
+                                pass
+                            api_logger = getattr(self, "api_logger", None)
+                            if callable(api_logger):
+                                api_logger("embed", "COHERE_API_KEY_CHAT", note="rag_similarity_retry", key_index=_emb_idx2)
                             results = self.vectorstore_query.similarity_search_with_score(q, k=smaller_k)
                         except Exception as inner_e2:
                             print(f"[RAG] Retry failed for query variant {idx}: {inner_e2}")
+                            try:
+                                self._keybank.penalize_key(_emb_idx2, seconds=1.5)
+                            except Exception:
+                                pass
                             continue
                     else:
                         continue

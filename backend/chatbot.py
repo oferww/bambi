@@ -1,7 +1,6 @@
 import os
 from typing import List, Dict, Any, Optional
 import json
-import concurrent.futures as cf
 from .rag_system import RAGSystem
 from langchain.memory import ConversationSummaryBufferMemory
 from langchain.schema import BaseMessage, HumanMessage, AIMessage
@@ -9,6 +8,7 @@ from langchain_core.documents import Document
 from langchain_community.llms import Cohere
 from langchain_cohere import ChatCohere
 from langchain.retrievers.document_compressors import CohereRerank
+from .utils.key_bank import get_keybank
 
 class OferGPT:
     """Personal chatbot about Ofer using RAG with photos and memories."""
@@ -20,20 +20,18 @@ class OferGPT:
         self.rag_system.api_logger = self._log_api_call
         self.conversation_history = []  # Keep for backward compatibility
         
-        # Initialize LangChain Cohere LLM for memory summarization
+        # Initialize KeyBank for rotating Cohere chat keys
+        self._keybank = get_keybank()
+        # Initialize LangChain Cohere LLM for memory summarization with one key from the bank
+        _mem_key = self._keybank.get_key("memory_summarize")
         self.langchain_llm = Cohere(
-            cohere_api_key=os.getenv("COHERE_API_KEY_CHAT"),
+            cohere_api_key=_mem_key,
             model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
             temperature=0.35,  # Lower temperature for summarization
             max_tokens=200
         )
-        # Primary chat/inference model (LangChain provider)
-        self.chat_llm = ChatCohere(
-            cohere_api_key=os.getenv("COHERE_API_KEY_CHAT"),
-            model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
-            temperature=0.35,
-            max_tokens=300,
-        )
+        # Do not keep a persistent ChatCohere for chat; create per call using key bank
+        self.chat_llm = None
         
         # Initialize conversation memory with Cohere for smart summarization
         self.memory = ConversationSummaryBufferMemory(
@@ -72,19 +70,22 @@ class OferGPT:
             ("rerank", "COHERE_API_KEY_CHAT"): 0,
         }
 
-    def _log_api_call(self, api_type: str, which_key: str, note: Optional[str] = None):
+    def _log_api_call(self, api_type: str, which_key: str, note: Optional[str] = None, key_index: Optional[int] = None):
         """Record and print a single API call occurrence.
 
         api_type: 'chat' | 'embed' | 'rerank'
         which_key: 'COHERE_API_KEY_CHAT' | 'COHERE_API_KEY_EMBED'
         note: optional short context string
+        key_index: optional index of key selected from the bank
         """
         key = (api_type, which_key)
         if key not in self._api_counts:
             self._api_counts[key] = 0
         self._api_counts[key] += 1
         try:
-            print(f"[API_CALL] type={api_type} key={which_key}{(' note='+note) if note else ''}", flush=True)
+            extra = f" note={note}" if note else ""
+            idxs = f" key_index={key_index}" if key_index is not None else ""
+            print(f"[API_CALL] type={api_type} key={which_key}{extra}{idxs}", flush=True)
         except Exception:
             pass
 
@@ -213,31 +214,34 @@ class OferGPT:
             )
             # Use LangChain ChatCohere for intent classification
             messages = [HumanMessage(content=prompt)]
-            ex = None
-            if timeout_s and timeout_s > 0:
+            max_tries = self._keybank.key_count()
+            last_err = None
+            for _ in range(max_tries):
+                _intent_key, _intent_idx = self._keybank.get_key_with_index("intent")
+                self._log_api_call("chat", "COHERE_API_KEY_CHAT", note="intent_detect", key_index=_intent_idx)
+                _intent_llm = ChatCohere(
+                    cohere_api_key=_intent_key,
+                    model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
+                    temperature=0.35,
+                    max_tokens=300,
+                )
                 try:
-                    ex = cf.ThreadPoolExecutor(max_workers=1)
-                    # Log API call for intent detection (Chat, CHAT key)
-                    self._log_api_call("chat", "COHERE_API_KEY_CHAT", note="intent_detect")
-                    fut = ex.submit(self.chat_llm.invoke, messages)
-                    resp_msg = fut.result(timeout=timeout_s)
-                except cf.TimeoutError:
-                    print(f"[INTENT] timed out after {timeout_s}s; fallback to 'question'", flush=True)
-                    if ex is not None:
-                        try:
-                            ex.shutdown(wait=False, cancel_futures=True)
-                        except Exception:
-                            pass
-                    return "question"
-                finally:
-                    if ex is not None:
-                        try:
-                            ex.shutdown(wait=False, cancel_futures=True)
-                        except Exception:
-                            pass
+                    resp_msg = _intent_llm.invoke(messages)
+                    break
+                except Exception as e:
+                    last_err = e
+                    try:
+                        print(f"[CHAT][ERROR] note=intent_detect key_index={_intent_idx} error={e}", flush=True)
+                    except Exception:
+                        pass
+                    try:
+                        self._keybank.penalize_key(_intent_idx, seconds=1.5)
+                    except Exception:
+                        pass
+                    continue
             else:
-                self._log_api_call("chat", "COHERE_API_KEY_CHAT", note="intent_detect")
-                resp_msg = self.chat_llm.invoke(messages)
+                print(f"[INTENT] all keys failed: {last_err}", flush=True)
+                return "question"
 
             raw_intent = (getattr(resp_msg, "content", None) or "").strip()
             print(f"[INTENT][RAW_RESPONSE] {raw_intent!r}", flush=True)
@@ -375,39 +379,18 @@ class OferGPT:
         return context_str
 
     def get_relevant_context(self, query: str) -> str:
-        """Retrieve relevant context with a timeout; if exceeded, return empty context.
-
-        Timeout is configured by env var OFERGPT_RAG_TIMEOUT_SEC (default 20). Set to 0 to disable.
-        """
+        """Retrieve relevant context (no per-step timeout)."""
         try:
-            timeout_s = int(os.getenv("OFERGPT_RAG_TIMEOUT_SEC", "20"))
-        except Exception:
-            timeout_s = 20
-        if timeout_s is not None and timeout_s > 0:
-            ex = None
-            try:
-                ex = cf.ThreadPoolExecutor(max_workers=1)
-                fut = ex.submit(self._compute_relevant_context, query)
-                return fut.result(timeout=timeout_s)
-            except cf.TimeoutError:
-                print(f"⏳ RAG timed out after {timeout_s}s; proceeding without documents.", flush=True)
-                self.last_rag_context = ""
-                self.last_user_query = query
-                return ""
-            except Exception as e:
-                print(f"❌ RAG retrieval failed: {e}", flush=True)
-                self.last_rag_context = ""
-                self.last_user_query = query
-                return ""
-            finally:
-                if ex is not None:
-                    try:
-                        ex.shutdown(wait=False, cancel_futures=True)
-                    except Exception:
-                        pass
-        # No timeout specified; compute directly
-        return self._compute_relevant_context(query)
-    
+            context_str = self._compute_relevant_context(query)
+            self.last_rag_context = context_str
+            self.last_user_query = query
+            return context_str
+        except Exception as e:
+            print(f"❌ RAG retrieval failed: {e}", flush=True)
+            self.last_rag_context = ""
+            self.last_user_query = query
+            return ""
+
     def apply_rerank(self, query: str, retrieved: list[dict]) -> list[dict]:
         """Apply rerank to retrieved docs using LangChain CohereRerank.
 
@@ -438,13 +421,30 @@ class OferGPT:
                 return retrieved
 
             rerank_model = os.getenv("OFERGPT_RERANK_MODEL", "rerank-english-v3.0")
-            compressor = CohereRerank(
-                cohere_api_key=os.getenv("COHERE_API_KEY_CHAT"),
-                model=rerank_model,
-            )
-            # Log rerank API call (CHAT key)
-            self._log_api_call("rerank", "COHERE_API_KEY_CHAT", note="rerank")
-            ranked_docs = compressor.compress_documents(docs, query)
+            from .utils.key_bank import get_keybank
+            max_tries = self._keybank.key_count()
+            last_err = None
+            for _ in range(max_tries):
+                _rr_key, _rr_idx = get_keybank().get_key_with_index("rerank")
+                compressor = CohereRerank(
+                    cohere_api_key=_rr_key,
+                    model=rerank_model,
+                )
+                # Log rerank API call with key index (CHAT key pool)
+                self._log_api_call("rerank", "COHERE_API_KEY_CHAT", note="rerank", key_index=_rr_idx)
+                try:
+                    ranked_docs = compressor.compress_documents(docs, query)
+                    break
+                except Exception as e:
+                    last_err = e
+                    try:
+                        get_keybank().penalize_key(_rr_idx, seconds=1.5)
+                    except Exception:
+                        pass
+                    continue
+            else:
+                print(f"[RERANK] all keys failed: {last_err}", flush=True)
+                return retrieved
             # Map ranked_docs order back to original dicts by content identity
             content_to_items = {}
             for idx, d in enumerate(head):
@@ -506,29 +506,38 @@ class OferGPT:
                 timeout_s = 20
             messages = [HumanMessage(content=prompt)]
             ex = None
-            if timeout_s and timeout_s > 0:
+            max_tries = self._keybank.key_count()
+            last_err = None
+            for _ in range(max_tries):
+                _chat_key, _chat_idx = self._keybank.get_key_with_index("chat_invoke")
+                self._log_api_call("chat", "COHERE_API_KEY_CHAT", note="chat_invoke", key_index=_chat_idx)
+                _chat_llm = ChatCohere(
+                    cohere_api_key=_chat_key,
+                    model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
+                    temperature=0.35,
+                    max_tokens=300,
+                )
                 try:
-                    ex = cf.ThreadPoolExecutor(max_workers=1)
-                    self._log_api_call("chat", "COHERE_API_KEY_CHAT", note="chat_invoke")
-                    fut = ex.submit(self.chat_llm.invoke, messages)
-                    resp_msg = fut.result(timeout=timeout_s)
-                except cf.TimeoutError:
-                    print("⏳ Chat invocation timed out; returning fallback message.", flush=True)
-                    if ex is not None:
-                        try:
-                            ex.shutdown(wait=False, cancel_futures=True)
-                        except Exception:
-                            pass
-                    return "I'm sorry, the request took too long. Please try again."
-                finally:
-                    if ex is not None:
-                        try:
-                            ex.shutdown(wait=False, cancel_futures=True)
-                        except Exception:
-                            pass
+                    resp_msg = _chat_llm.invoke(messages)
+                    break
+                except Exception as e:
+                    last_err = e
+                    try:
+                        print(f"[CHAT][ERROR] note=chat_invoke key_index={_chat_idx} error={e}", flush=True)
+                    except Exception:
+                        pass
+                    try:
+                        self._keybank.penalize_key(_chat_idx, seconds=1.5)
+                    except Exception:
+                        pass
+                    continue
             else:
-                self._log_api_call("chat", "COHERE_API_KEY_CHAT", note="chat_invoke")
-                resp_msg = self.chat_llm.invoke(messages)
+                print(f"[CHAT] all keys failed: {last_err}", flush=True)
+                return (
+                    "I'm sorry, I'm having trouble generating a response right now. "
+                    "I am using a trial key, which is limited to 10 API calls/minute. "
+                    "Please try again in a few seconds."
+                )
             # Log response content (best-effort)
             try:
                 print(f"[CHAT][RESPONSE] {getattr(resp_msg, 'content', None)!r}", flush=True)
@@ -536,9 +545,6 @@ class OferGPT:
                 pass
             answer = (getattr(resp_msg, "content", None) or "").strip()
             return answer
-        except cf.TimeoutError:
-            print("⏳ Chat invocation timed out; returning fallback message.", flush=True)
-            return "I'm sorry, the request took too long. Please try again."
         except Exception as e:
             print(f"Error generating response with memory: {e}")
             return (
@@ -581,85 +587,60 @@ class OferGPT:
                     "prompt_preview": prompt[:500],
                 }
                 print(f"[CHAT][REQUEST] {json.dumps(params, ensure_ascii=False)}", flush=True)
-                # Optional hard timeout for streaming via executor
-                try:
-                    stream_timeout = int(os.getenv("OFERGPT_STREAM_TIMEOUT_SEC", "0"))
-                except Exception:
-                    stream_timeout = 0
-                if stream_timeout and stream_timeout > 0:
-                    # Execute streaming in a worker and collect full text; then simulate streaming
-                    def _run_stream_collect() -> str:
-                        collected = ""
-                        for chunk in self.chat_llm.stream([HumanMessage(content=prompt)]):
+                # Real-time streaming only; global timeout is enforced by the caller (frontend)
+                full_response = ""
+                token_count = 0
+                max_tries = self._keybank.key_count()
+                last_err = None
+                for _ in range(max_tries):
+                    _stream_key, _stream_idx = self._keybank.get_key_with_index("chat_stream")
+                    self._log_api_call("chat", "COHERE_API_KEY_CHAT", note="chat_stream", key_index=_stream_idx)
+                    _stream_llm = ChatCohere(
+                        cohere_api_key=_stream_key,
+                        model=os.getenv("COHERE_CHAT_MODEL", "command-a-vision-07-2025"),
+                        temperature=0.35,
+                        max_tokens=300,
+                    )
+                    try:
+                        for chunk in _stream_llm.stream([HumanMessage(content=prompt)]):
                             seg = getattr(chunk, "content", None)
                             if seg:
-                                collected += seg
-                        return collected
-                    ex = None
-                    try:
-                        full_response = ""
-                        token_count = 0
-                        self._log_api_call("chat", "COHERE_API_KEY_CHAT", note="chat_stream")
-                        ex = cf.ThreadPoolExecutor(max_workers=1)
-                        fut = ex.submit(_run_stream_collect)
-                        collected = fut.result(timeout=stream_timeout)
-                        # Simulate streaming from collected content
-                        words = (collected or "").split(' ')
-                        for i, word in enumerate(words):
-                            seg = ('' if i == 0 else ' ') + word
-                            token_count += 1
-                            yield seg
-                        print(f"✅ Streaming (collected) completed: {token_count} chunks", flush=True)
+                                full_response += seg
+                                token_count += 1
+                                yield seg
+                        print(f"✅ Streaming completed: {token_count} chunks", flush=True)
                         if token_count == 0:
                             raise RuntimeError("Streaming returned 0 chunks; forcing fallback to non-streaming generation.")
-                        return
-                    except cf.TimeoutError:
-                        print(f"⏳ Streaming timed out after {stream_timeout}s; falling back.", flush=True)
-                        if ex is not None:
-                            try:
-                                ex.shutdown(wait=False, cancel_futures=True)
-                            except Exception:
-                                pass
-                        raise RuntimeError("stream_timeout")
-                    finally:
-                        if ex is not None:
-                            try:
-                                ex.shutdown(wait=False, cancel_futures=True)
-                            except Exception:
-                                pass
+                        break
+                    except Exception as e:
+                        last_err = e
+                        try:
+                            print(f"[CHAT][ERROR] note=chat_stream key_index={_stream_idx} error={e}", flush=True)
+                        except Exception:
+                            pass
+                        try:
+                            self._keybank.penalize_key(_stream_idx, seconds=1.5)
+                        except Exception:
+                            pass
+                        continue
                 else:
-                    # Real-time streaming (no hard timeout)
-                    full_response = ""
-                    token_count = 0
-                    # Log streaming API call once
-                    self._log_api_call("chat", "COHERE_API_KEY_CHAT", note="chat_stream")
-                    for chunk in self.chat_llm.stream([HumanMessage(content=prompt)]):
-                        seg = getattr(chunk, "content", None)
-                        if seg:
-                            full_response += seg
-                            token_count += 1
-                            yield seg
-                    print(f"✅ Streaming completed: {token_count} chunks", flush=True)
-                    if token_count == 0:
-                        raise RuntimeError("Streaming returned 0 chunks; forcing fallback to non-streaming generation.")
+                    raise RuntimeError(f"stream_failed_all_keys: {last_err}")
             except Exception as stream_error:
                 print(f"❌ Streaming failed: {stream_error}", flush=True)
-                print("🔄 Falling back to simulated streaming...", flush=True)
-                self._log_api_call("chat", "COHERE_API_KEY_CHAT", note="chat_fallback_invoke")
-                resp_msg = self.chat_llm.invoke([HumanMessage(content=prompt)])
-                full_text = (getattr(resp_msg, "content", None) or "").strip()
-                print(f"✅ Generated complete response: {len(full_text)} characters", flush=True)
-                words = full_text.split(' ')
-                print(f"🎭 Simulating streaming: {len(words)} words", flush=True)
-                for i, word in enumerate(words):
-                    yield ('' if i == 0 else ' ') + word
-                    time.sleep(0.05)
-                print("✅ Simulated streaming completed", flush=True)
+                # Remove simulated streaming fallback; propagate to outer handler
+                raise
         except Exception as e:
             print(f"Error generating streaming response: {e}", flush=True)
-            yield "I'm sorry, I'm having trouble generating a response right now. \
-            I am using a trial key, which is limited to 10 API calls/minute. \
-            Please try again in a few seconds."
+            msg = (
+                "I'm sorry, I'm having trouble generating a response right now. "
+                "I am using a trial key, which is limited to 10 API calls/minute. "
+                "Please try again in a few seconds."
+            )
+            print("🎭 Simulating streaming of error message", flush=True)
+            for i, word in enumerate(msg.split(" ")):
+                yield (("" if i == 0 else " ") + word)
+                time.sleep(0.03)
+            print("✅ Error message streaming completed", flush=True)
 
     ### Memory management ###
 
