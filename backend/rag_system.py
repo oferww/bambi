@@ -114,6 +114,13 @@ class RAGSystem:
             embedding_function=self.query_embeddings,
             collection_name="ofergpt_memories"
         )
+        # One-time startup log: total chunks in collection
+        try:
+            _coll = self.chroma_client.get_or_create_collection("ofergpt_memories")
+            _count = int(_coll.count())
+            print(f"[RAG][INFO] Startup total vector store chunks: {_count}", flush=True)
+        except Exception:
+            pass
         
         # Text splitter for chunking (env-configurable)
         chunk_size = int(os.getenv("OFERGPT_RAG_CHUNK_SIZE", "1500"))

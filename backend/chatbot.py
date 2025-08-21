@@ -1,4 +1,5 @@
 import os
+import uuid
 from typing import List, Dict, Any, Optional
 import json
 from .rag_system import RAGSystem
@@ -9,6 +10,7 @@ from langchain_community.llms import Cohere
 from langchain_cohere import ChatCohere
 from langchain.retrievers.document_compressors import CohereRerank
 from .utils.key_bank import get_keybank
+from .utils.mongo_logger import get_mongo_logger
 
 class OferGPT:
     """Personal chatbot about Ofer using RAG with photos and memories."""
@@ -19,6 +21,10 @@ class OferGPT:
         self._api_counts = {}
         self.rag_system.api_logger = self._log_api_call
         self.conversation_history = []  # Keep for backward compatibility
+        # Mongo logger (no-op if not configured)
+        self.mongo_logger = get_mongo_logger()
+        # Conversation session id for grouping turns
+        self.session_id = str(uuid.uuid4())
         
         # Initialize KeyBank for rotating Cohere chat keys
         self._keybank = get_keybank()
@@ -142,6 +148,26 @@ class OferGPT:
         self.conversation_history.append({"role": "assistant", "content": response})
         # Print per-prompt API totals
         self._print_api_totals("chat_end")
+        # Persist interaction to Mongo (session-based only, best-effort)
+        try:
+            used_rag = intent not in {"greeting", "chitchat", "nonsense"}
+            breakdown = {f"{k[0]}:{k[1]}": v for k, v in self._api_counts.items() if v}
+            ctx_preview = self._truncate(self.last_rag_context or "", 500)
+            self.mongo_logger.upsert_session_turn(
+                session_id=self.session_id,
+                turn={
+                    "user": user_input,
+                    "assistant": response,
+                    "intent": intent,
+                    "used_rag": used_rag,
+                    "api_calls": breakdown,
+                    "rag_context_preview": ctx_preview,
+                },
+                summary=None,
+                meta=None,
+            )
+        except Exception:
+            pass
         
         return response
     
@@ -174,6 +200,26 @@ class OferGPT:
         self.conversation_history.append({"role": "assistant", "content": full_response})
         # Print per-prompt API totals
         self._print_api_totals("chat_stream_end")
+        # Persist interaction to Mongo (session-based only, best-effort)
+        try:
+            used_rag = intent not in {"greeting", "chitchat", "nonsense"}
+            breakdown = {f"{k[0]}:{k[1]}": v for k, v in self._api_counts.items() if v}
+            ctx_preview = self._truncate(self.last_rag_context or "", 500)
+            self.mongo_logger.upsert_session_turn(
+                session_id=self.session_id,
+                turn={
+                    "user": user_input,
+                    "assistant": full_response,
+                    "intent": intent,
+                    "used_rag": used_rag,
+                    "api_calls": breakdown,
+                    "rag_context_preview": ctx_preview,
+                },
+                summary=None,
+                meta=None,
+            )
+        except Exception:
+            pass
 
     ### Intent detection ###
 
@@ -648,6 +694,12 @@ class OferGPT:
         """Clear only the conversation memory, keep knowledge base."""
         self.memory.clear()
         self.conversation_history = []
+        # Mark session ended and start a new one
+        try:
+            self.mongo_logger.end_session(session_id=self.session_id, meta=None)
+        except Exception:
+            pass
+        self.session_id = str(uuid.uuid4())
 
     ### Knowledge base management ###
 
