@@ -3,7 +3,10 @@
 </p>
 
 <p align="center">
-  A personal AI assistant that knows about Ofer’s life. <br>
+  <a href="https://bambi.up.railway.app" style="color: orange; text-decoration: none;" target="_blank">
+    bambi.up.railway.app
+  </a><br>
+  A personal AI assistant that knows about Ofer’s life.<br>
   It uses RAG (Retrieval Augmented Generation) over my data, to answer questions, with a Streamlit frontend and a Cohere-powered backend.
 </p>
 
